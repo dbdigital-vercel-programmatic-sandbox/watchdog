@@ -1,0 +1,9 @@
+{
+    "version": "v1",
+    "ports": [
+      {
+        "port": 3000,
+        "label": "app"
+      }
+    ]
+  }
