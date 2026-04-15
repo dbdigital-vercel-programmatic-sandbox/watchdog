@@ -273,7 +273,7 @@ export async function POST(req: Request) {
   const requestId = crypto.randomUUID()
   const startedAt = performance.now()
   const gatewayApiKey = process.env.APP_BUILDER_VERCEL_AI_GATEWAY
-  const modelId = "anthropic/claude-sonnet-4.5"
+  const modelId = "openai/gpt-4.1-mini"
   const envSnapshot = {
     nextPublicCdnUrl: process.env.NEXT_PUBLIC_CDN_URL ?? null,
     nodeEnv: process.env.NODE_ENV ?? null,

@@ -22,7 +22,7 @@ import { Button } from "@/components/ui/button"
 
 ## AI Gateway auth
 
-This app uses Vercel AI Gateway model IDs (for example `anthropic/claude-sonnet-4.5`) via the AI SDK.
+This app uses Vercel AI Gateway model IDs (for example `openai/gpt-4.1-mini`) via the AI SDK.
 
 - Vercel deployment: use OIDC auth automatically (no provider key and no `AI_GATEWAY_API_KEY` required in production).
 - Local development: set `APP_BUILDER_VERCEL_AI_GATEWAY` in `.env.local`.
