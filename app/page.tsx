@@ -104,15 +104,26 @@ export default function ArticleComparison() {
         body: JSON.stringify({ sourceArticle, referenceArticle }),
       })
 
+      const payload = await response.json()
+
       if (!response.ok) {
-        throw new Error("Failed to analyze articles")
+        const debugMessage = payload?.debug?.message
+          ? ` (${payload.debug.message})`
+          : ""
+        const requestId = payload?.requestId
+          ? ` [requestId: ${payload.requestId}]`
+          : ""
+        throw new Error(
+          `${payload?.error ?? "Failed to analyze articles"}${debugMessage}${requestId}`
+        )
       }
 
-      const result = await response.json()
-      setAnalysis(result)
+      setAnalysis(payload)
     } catch (err) {
       setError(
-        "An error occurred while analyzing the articles. Please try again."
+        err instanceof Error
+          ? err.message
+          : "An error occurred while analyzing the articles. Please try again."
       )
     } finally {
       setIsAnalyzing(false)

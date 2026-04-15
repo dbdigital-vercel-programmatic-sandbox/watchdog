@@ -1,6 +1,57 @@
 import { generateObject } from "ai"
-import { anthropic } from "@ai-sdk/anthropic"
+import { createGateway } from "@ai-sdk/gateway"
 import { z } from "zod"
+
+function safeJson(value: unknown) {
+  try {
+    return JSON.stringify(
+      value,
+      (_key, v) => {
+        if (v instanceof Error) {
+          return {
+            name: v.name,
+            message: v.message,
+            stack: v.stack,
+            cause: v.cause,
+          }
+        }
+
+        if (typeof v === "bigint") {
+          return v.toString()
+        }
+
+        return v
+      },
+      2
+    )
+  } catch {
+    return String(value)
+  }
+}
+
+function toErrorDetails(error: unknown) {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack,
+      cause:
+        error.cause instanceof Error
+          ? {
+              name: error.cause.name,
+              message: error.cause.message,
+              stack: error.cause.stack,
+            }
+          : error.cause,
+    }
+  }
+
+  return {
+    name: "UnknownError",
+    message: typeof error === "string" ? error : "Non-Error thrown",
+    value: error,
+  }
+}
 
 const analysisSchema = z.object({
   strengths: z
@@ -141,7 +192,27 @@ const analysisSchema = z.object({
 })
 
 export async function POST(req: Request) {
+  const requestId = crypto.randomUUID()
+  const gatewayApiKey = process.env.APP_BUILDER_VERCEL_AI_GATEWAY
+
   try {
+    if (!gatewayApiKey) {
+      return Response.json(
+        {
+          ok: false,
+          error:
+            "APP_BUILDER_VERCEL_AI_GATEWAY is not set. Add it to your environment before generating scripts.",
+          status: 500,
+          requestId,
+        },
+        { status: 500 }
+      )
+    }
+
+    const gateway = createGateway({
+      apiKey: gatewayApiKey,
+    })
+
     const { sourceArticle, referenceArticle } = await req.json()
 
     if (!sourceArticle || !referenceArticle) {
@@ -152,7 +223,7 @@ export async function POST(req: Request) {
     }
 
     const result = await generateObject({
-      model: anthropic("claude-sonnet-4.5"),
+      model: gateway("anthropic/claude-sonnet-4.5"),
       schema: analysisSchema,
       prompt: `Analyze and compare these two articles comprehensively.
 
@@ -179,9 +250,45 @@ Be specific, constructive, and provide concrete examples from the text where pos
 
     return Response.json(result.object)
   } catch (error) {
-    console.error("Analysis error:", error)
+    const details = toErrorDetails(error)
+
+    const payload = {
+      requestId,
+      error: details,
+      context: {
+        model: "anthropic/claude-sonnet-4.5",
+        env: {
+          vercel: process.env.VERCEL,
+          hasAppBuilderGatewayKey: Boolean(
+            process.env.APP_BUILDER_VERCEL_AI_GATEWAY
+          ),
+          hasAIGatewayKey: Boolean(process.env.AI_GATEWAY_API_KEY),
+          nodeEnv: process.env.NODE_ENV,
+        },
+      },
+    }
+
+    console.error("[api/analyze] Analysis failed\n" + safeJson(payload))
+
+    const isDev = process.env.NODE_ENV !== "production"
+
     return Response.json(
-      { error: "Failed to analyze articles" },
+      {
+        error: "Failed to analyze articles",
+        requestId,
+        ...(isDev
+          ? {
+              debug: {
+                message: details.message,
+                name: details.name,
+                cause:
+                  typeof details.cause === "object"
+                    ? details.cause
+                    : String(details.cause ?? ""),
+              },
+            }
+          : {}),
+      },
       { status: 500 }
     )
   }
