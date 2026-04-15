@@ -2,6 +2,84 @@ import { generateObject } from "ai"
 import { createGateway } from "@ai-sdk/gateway"
 import { z } from "zod"
 
+type UsageMetrics = {
+  inputTokens: number | null
+  outputTokens: number | null
+  totalTokens: number | null
+  costUsd: number | null
+  durationMs: number
+  generationId: string | null
+  model: string
+}
+
+function toNumberOrNull(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? value : null
+}
+
+function getNestedValue(record: Record<string, unknown>, path: string[]) {
+  let current: unknown = record
+
+  for (const key of path) {
+    if (!current || typeof current !== "object" || !(key in current)) {
+      return undefined
+    }
+
+    current = (current as Record<string, unknown>)[key]
+  }
+
+  return current
+}
+
+function extractGenerationId(result: Record<string, unknown>) {
+  const candidates = [
+    result.generationId,
+    getNestedValue(result, ["response", "body", "generationId"]),
+    getNestedValue(result, ["providerMetadata", "gateway", "generationId"]),
+    getNestedValue(result, ["providerMetadata", "vercel", "generationId"]),
+  ]
+
+  for (const candidate of candidates) {
+    if (typeof candidate === "string" && candidate.startsWith("gen_")) {
+      return candidate
+    }
+  }
+
+  const headers = getNestedValue(result, ["response", "headers"])
+
+  if (headers && typeof headers === "object") {
+    for (const value of Object.values(headers as Record<string, unknown>)) {
+      if (typeof value === "string" && value.startsWith("gen_")) {
+        return value
+      }
+    }
+  }
+
+  return null
+}
+
+function extractCostUsd(result: Record<string, unknown>) {
+  const candidates = [
+    result.totalCost,
+    result.cost,
+    getNestedValue(result, ["response", "body", "totalCost"]),
+    getNestedValue(result, ["response", "body", "total_cost"]),
+    getNestedValue(result, ["providerMetadata", "gateway", "totalCost"]),
+    getNestedValue(result, ["providerMetadata", "gateway", "cost"]),
+    getNestedValue(result, ["providerMetadata", "vercel", "totalCost"]),
+    getNestedValue(result, ["providerMetadata", "vercel", "cost"]),
+  ]
+
+  for (const candidate of candidates) {
+    const value = toNumberOrNull(candidate)
+
+    if (value !== null) {
+      return value
+    }
+  }
+
+  return null
+}
+
 function safeJson(value: unknown) {
   try {
     return JSON.stringify(
@@ -193,7 +271,9 @@ const analysisSchema = z.object({
 
 export async function POST(req: Request) {
   const requestId = crypto.randomUUID()
+  const startedAt = performance.now()
   const gatewayApiKey = process.env.APP_BUILDER_VERCEL_AI_GATEWAY
+  const modelId = "anthropic/claude-sonnet-4.5"
   const envSnapshot = {
     nextPublicCdnUrl: process.env.NEXT_PUBLIC_CDN_URL ?? null,
     nodeEnv: process.env.NODE_ENV ?? null,
@@ -238,7 +318,7 @@ export async function POST(req: Request) {
     }
 
     const result = await generateObject({
-      model: gateway("anthropic/claude-sonnet-4.5"),
+      model: gateway(modelId),
       schema: analysisSchema,
       prompt: `Analyze and compare these two articles comprehensively.
 
@@ -263,7 +343,51 @@ Provide a detailed analysis covering:
 Be specific, constructive, and provide concrete examples from the text where possible.`,
     })
 
-    return Response.json(result.object)
+    const rawResult = result as unknown as Record<string, unknown>
+    const generationId = extractGenerationId(rawResult)
+    let costUsd = extractCostUsd(rawResult)
+
+    if (costUsd === null && generationId) {
+      try {
+        const generationInfo = await gateway.getGenerationInfo({
+          id: generationId,
+        })
+        costUsd = generationInfo.totalCost
+      } catch (costError) {
+        console.warn(
+          "[api/analyze] Failed to fetch generation cost\n" +
+            safeJson({
+              requestId,
+              generationId,
+              error: toErrorDetails(costError),
+            })
+        )
+      }
+    }
+
+    const metrics: UsageMetrics = {
+      inputTokens: result.usage.inputTokens ?? null,
+      outputTokens: result.usage.outputTokens ?? null,
+      totalTokens: result.usage.totalTokens ?? null,
+      costUsd,
+      durationMs: Math.round(performance.now() - startedAt),
+      generationId,
+      model: modelId,
+    }
+
+    console.log(
+      "[api/analyze] Usage summary\n" +
+        safeJson({
+          requestId,
+          metrics,
+        })
+    )
+
+    return Response.json({
+      analysis: result.object,
+      metrics,
+      requestId,
+    })
   } catch (error) {
     const details = toErrorDetails(error)
 
@@ -271,7 +395,7 @@ Be specific, constructive, and provide concrete examples from the text where pos
       requestId,
       error: details,
       context: {
-        model: "anthropic/claude-sonnet-4.5",
+        model: modelId,
         env: envSnapshot,
       },
     }

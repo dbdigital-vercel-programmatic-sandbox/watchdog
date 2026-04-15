@@ -81,10 +81,21 @@ interface AnalysisResult {
   }
 }
 
+interface UsageMetrics {
+  inputTokens: number | null
+  outputTokens: number | null
+  totalTokens: number | null
+  costUsd: number | null
+  durationMs: number
+  generationId: string | null
+  model: string
+}
+
 export default function ArticleComparison() {
   const [sourceArticle, setSourceArticle] = useState("")
   const [referenceArticle, setReferenceArticle] = useState("")
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null)
+  const [usageMetrics, setUsageMetrics] = useState<UsageMetrics | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -96,6 +107,7 @@ export default function ArticleComparison() {
 
     setIsAnalyzing(true)
     setError(null)
+    setUsageMetrics(null)
 
     try {
       const response = await fetch("/api/analyze", {
@@ -118,8 +130,10 @@ export default function ArticleComparison() {
         )
       }
 
-      setAnalysis(payload)
+      setAnalysis(payload.analysis)
+      setUsageMetrics(payload.metrics)
     } catch (err) {
+      setAnalysis(null)
       setError(
         err instanceof Error
           ? err.message
@@ -154,6 +168,35 @@ export default function ArticleComparison() {
       default:
         return null
     }
+  }
+
+  const formatNumber = (value: number | null) => {
+    if (value === null) {
+      return "-"
+    }
+
+    return new Intl.NumberFormat().format(value)
+  }
+
+  const formatCost = (value: number | null) => {
+    if (value === null) {
+      return "-"
+    }
+
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: "USD",
+      minimumFractionDigits: value < 0.01 ? 4 : 2,
+      maximumFractionDigits: value < 0.01 ? 4 : 2,
+    }).format(value)
+  }
+
+  const formatDuration = (value: number) => {
+    if (value < 1000) {
+      return `${value} ms`
+    }
+
+    return `${(value / 1000).toFixed(2)} s`
   }
 
   return (
@@ -241,544 +284,614 @@ export default function ArticleComparison() {
         )}
 
         {analysis && (
-          <Tabs defaultValue="strengths" className="space-y-4">
-            <TabsList className="grid w-full grid-cols-2 md:grid-cols-4 lg:grid-cols-6">
-              <TabsTrigger value="strengths">Strengths</TabsTrigger>
-              <TabsTrigger value="weaknesses">Weaknesses</TabsTrigger>
-              <TabsTrigger value="tone">Tone Analysis</TabsTrigger>
-              <TabsTrigger value="comparison">Comparison</TabsTrigger>
-              <TabsTrigger value="recommendations">Recommendations</TabsTrigger>
-              <TabsTrigger value="readability">Readability</TabsTrigger>
-            </TabsList>
-
-            <TabsContent value="strengths" className="space-y-4">
+          <div className="space-y-4">
+            {usageMetrics && (
               <Card>
                 <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-green-600">
-                    <CheckCircle className="h-5 w-5" />
-                    What Your Article Does Well
-                  </CardTitle>
+                  <CardTitle>Run Metrics</CardTitle>
                   <CardDescription>
-                    Strengths identified in your source article compared to the
-                    reference
+                    Token usage, cost, and response time for the latest analysis
                   </CardDescription>
                 </CardHeader>
                 <CardContent>
-                  <ScrollArea className="h-[500px] pr-4">
-                    <div className="space-y-4">
-                      {analysis.strengths.map((strength, index) => (
-                        <Card
-                          key={index}
-                          className="border-l-4 border-l-green-500"
-                        >
-                          <CardHeader className="pb-2">
-                            <div className="flex items-center justify-between">
-                              <CardTitle className="text-base">
-                                {strength.point}
-                              </CardTitle>
-                              <Badge variant="outline">
-                                {strength.category}
-                              </Badge>
-                            </div>
-                          </CardHeader>
-                          <CardContent>
-                            <p className="text-sm text-muted-foreground">
-                              {strength.explanation}
-                            </p>
-                          </CardContent>
-                        </Card>
-                      ))}
+                  <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
+                    <div className="rounded-lg border p-4">
+                      <p className="text-sm text-muted-foreground">
+                        Input tokens
+                      </p>
+                      <p className="text-2xl font-semibold">
+                        {formatNumber(usageMetrics.inputTokens)}
+                      </p>
                     </div>
-                  </ScrollArea>
+                    <div className="rounded-lg border p-4">
+                      <p className="text-sm text-muted-foreground">
+                        Output tokens
+                      </p>
+                      <p className="text-2xl font-semibold">
+                        {formatNumber(usageMetrics.outputTokens)}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border p-4">
+                      <p className="text-sm text-muted-foreground">
+                        Total tokens
+                      </p>
+                      <p className="text-2xl font-semibold">
+                        {formatNumber(usageMetrics.totalTokens)}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border p-4">
+                      <p className="text-sm text-muted-foreground">Cost</p>
+                      <p className="text-2xl font-semibold">
+                        {formatCost(usageMetrics.costUsd)}
+                      </p>
+                    </div>
+                    <div className="rounded-lg border p-4">
+                      <p className="text-sm text-muted-foreground">
+                        Time taken
+                      </p>
+                      <p className="text-2xl font-semibold">
+                        {formatDuration(usageMetrics.durationMs)}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2 text-sm text-muted-foreground">
+                    <span>Model: {usageMetrics.model}</span>
+                    {usageMetrics.generationId && (
+                      <span>Generation: {usageMetrics.generationId}</span>
+                    )}
+                  </div>
                 </CardContent>
               </Card>
-            </TabsContent>
+            )}
 
-            <TabsContent value="weaknesses" className="space-y-4">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2 text-red-600">
-                    <XCircle className="h-5 w-5" />
-                    Areas for Improvement
-                  </CardTitle>
-                  <CardDescription>
-                    Weaknesses identified in your source article with severity
-                    levels
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <ScrollArea className="h-[500px] pr-4">
-                    <div className="space-y-4">
-                      {analysis.weaknesses.map((weakness, index) => (
-                        <Card
-                          key={index}
-                          className={`border-l-4 ${
-                            weakness.severity === "high"
-                              ? "border-l-red-500"
-                              : weakness.severity === "medium"
-                                ? "border-l-yellow-500"
-                                : "border-l-blue-500"
-                          }`}
-                        >
-                          <CardHeader className="pb-2">
-                            <div className="flex items-center justify-between">
-                              <CardTitle className="text-base">
-                                {weakness.point}
-                              </CardTitle>
-                              <div className="flex items-center gap-2">
+            <Tabs defaultValue="strengths" className="space-y-4">
+              <TabsList className="grid w-full grid-cols-2 md:grid-cols-4 lg:grid-cols-6">
+                <TabsTrigger value="strengths">Strengths</TabsTrigger>
+                <TabsTrigger value="weaknesses">Weaknesses</TabsTrigger>
+                <TabsTrigger value="tone">Tone Analysis</TabsTrigger>
+                <TabsTrigger value="comparison">Comparison</TabsTrigger>
+                <TabsTrigger value="recommendations">
+                  Recommendations
+                </TabsTrigger>
+                <TabsTrigger value="readability">Readability</TabsTrigger>
+              </TabsList>
+
+              <TabsContent value="strengths" className="space-y-4">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2 text-green-600">
+                      <CheckCircle className="h-5 w-5" />
+                      What Your Article Does Well
+                    </CardTitle>
+                    <CardDescription>
+                      Strengths identified in your source article compared to
+                      the reference
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <ScrollArea className="h-[500px] pr-4">
+                      <div className="space-y-4">
+                        {analysis.strengths.map((strength, index) => (
+                          <Card
+                            key={index}
+                            className="border-l-4 border-l-green-500"
+                          >
+                            <CardHeader className="pb-2">
+                              <div className="flex items-center justify-between">
+                                <CardTitle className="text-base">
+                                  {strength.point}
+                                </CardTitle>
                                 <Badge variant="outline">
-                                  {weakness.category}
-                                </Badge>
-                                <Badge
-                                  className={getSeverityColor(
-                                    weakness.severity
-                                  )}
-                                >
-                                  {weakness.severity}
+                                  {strength.category}
                                 </Badge>
                               </div>
-                            </div>
-                          </CardHeader>
-                          <CardContent>
-                            <p className="text-sm text-muted-foreground">
-                              {weakness.explanation}
-                            </p>
-                          </CardContent>
-                        </Card>
-                      ))}
-                    </div>
-                  </ScrollArea>
-                </CardContent>
-              </Card>
-            </TabsContent>
+                            </CardHeader>
+                            <CardContent>
+                              <p className="text-sm text-muted-foreground">
+                                {strength.explanation}
+                              </p>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </div>
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+              </TabsContent>
 
-            <TabsContent value="tone" className="space-y-4">
-              <div className="grid gap-4 md:grid-cols-2">
+              <TabsContent value="weaknesses" className="space-y-4">
                 <Card>
                   <CardHeader>
-                    <CardTitle>Source Article Tone</CardTitle>
+                    <CardTitle className="flex items-center gap-2 text-red-600">
+                      <XCircle className="h-5 w-5" />
+                      Areas for Improvement
+                    </CardTitle>
                     <CardDescription>
-                      Tone analysis of your article
+                      Weaknesses identified in your source article with severity
+                      levels
                     </CardDescription>
                   </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div>
-                      <h4 className="font-semibold">Primary Tone</h4>
-                      <p className="text-sm text-muted-foreground">
-                        {analysis.toneAnalysis.sourceTone.primaryTone}
-                      </p>
-                    </div>
-                    <div>
-                      <h4 className="font-semibold">Descriptors</h4>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {analysis.toneAnalysis.sourceTone.toneDescriptors.map(
-                          (desc, i) => (
-                            <Badge key={i} variant="secondary">
-                              {desc}
-                            </Badge>
+                  <CardContent>
+                    <ScrollArea className="h-[500px] pr-4">
+                      <div className="space-y-4">
+                        {analysis.weaknesses.map((weakness, index) => (
+                          <Card
+                            key={index}
+                            className={`border-l-4 ${
+                              weakness.severity === "high"
+                                ? "border-l-red-500"
+                                : weakness.severity === "medium"
+                                  ? "border-l-yellow-500"
+                                  : "border-l-blue-500"
+                            }`}
+                          >
+                            <CardHeader className="pb-2">
+                              <div className="flex items-center justify-between">
+                                <CardTitle className="text-base">
+                                  {weakness.point}
+                                </CardTitle>
+                                <div className="flex items-center gap-2">
+                                  <Badge variant="outline">
+                                    {weakness.category}
+                                  </Badge>
+                                  <Badge
+                                    className={getSeverityColor(
+                                      weakness.severity
+                                    )}
+                                  >
+                                    {weakness.severity}
+                                  </Badge>
+                                </div>
+                              </div>
+                            </CardHeader>
+                            <CardContent>
+                              <p className="text-sm text-muted-foreground">
+                                {weakness.explanation}
+                              </p>
+                            </CardContent>
+                          </Card>
+                        ))}
+                      </div>
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+              </TabsContent>
+
+              <TabsContent value="tone" className="space-y-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Source Article Tone</CardTitle>
+                      <CardDescription>
+                        Tone analysis of your article
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div>
+                        <h4 className="font-semibold">Primary Tone</h4>
+                        <p className="text-sm text-muted-foreground">
+                          {analysis.toneAnalysis.sourceTone.primaryTone}
+                        </p>
+                      </div>
+                      <div>
+                        <h4 className="font-semibold">Descriptors</h4>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {analysis.toneAnalysis.sourceTone.toneDescriptors.map(
+                            (desc, i) => (
+                              <Badge key={i} variant="secondary">
+                                {desc}
+                              </Badge>
+                            )
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        <h4 className="font-semibold">Emotional Impact</h4>
+                        <p className="text-sm text-muted-foreground">
+                          {analysis.toneAnalysis.sourceTone.emotionalImpact}
+                        </p>
+                      </div>
+                      <div>
+                        <h4 className="font-semibold">Appropriateness</h4>
+                        <p className="text-sm text-muted-foreground">
+                          {analysis.toneAnalysis.sourceTone.appropriateness}
+                        </p>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Reference Article Tone</CardTitle>
+                      <CardDescription>
+                        Tone analysis of the reference article
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div>
+                        <h4 className="font-semibold">Primary Tone</h4>
+                        <p className="text-sm text-muted-foreground">
+                          {analysis.toneAnalysis.referenceTone.primaryTone}
+                        </p>
+                      </div>
+                      <div>
+                        <h4 className="font-semibold">Descriptors</h4>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {analysis.toneAnalysis.referenceTone.toneDescriptors.map(
+                            (desc, i) => (
+                              <Badge key={i} variant="secondary">
+                                {desc}
+                              </Badge>
+                            )
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        <h4 className="font-semibold">Emotional Impact</h4>
+                        <p className="text-sm text-muted-foreground">
+                          {analysis.toneAnalysis.referenceTone.emotionalImpact}
+                        </p>
+                      </div>
+                      <div>
+                        <h4 className="font-semibold">Appropriateness</h4>
+                        <p className="text-sm text-muted-foreground">
+                          {analysis.toneAnalysis.referenceTone.appropriateness}
+                        </p>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Tone Comparison</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <p className="text-muted-foreground">
+                      {analysis.toneAnalysis.toneComparison}
+                    </p>
+                  </CardContent>
+                </Card>
+              </TabsContent>
+
+              <TabsContent value="comparison" className="space-y-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-green-600">
+                        Unique to Source
+                      </CardTitle>
+                      <CardDescription>
+                        Points your article covers that the reference
+                        doesn&apos;t
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <ul className="space-y-2">
+                        {analysis.comparisonInsights.uniqueToSource.map(
+                          (point, i) => (
+                            <li
+                              key={i}
+                              className="flex items-start gap-2 text-sm"
+                            >
+                              <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-green-500" />
+                              <span>{point}</span>
+                            </li>
+                          )
+                        )}
+                      </ul>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-blue-600">
+                        Unique to Reference
+                      </CardTitle>
+                      <CardDescription>
+                        Points the reference covers that yours doesn&apos;t
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <ul className="space-y-2">
+                        {analysis.comparisonInsights.uniqueToReference.map(
+                          (point, i) => (
+                            <li
+                              key={i}
+                              className="flex items-start gap-2 text-sm"
+                            >
+                              <Lightbulb className="mt-0.5 h-4 w-4 shrink-0 text-blue-500" />
+                              <span>{point}</span>
+                            </li>
+                          )
+                        )}
+                      </ul>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-purple-600">
+                        Both Cover Well
+                      </CardTitle>
+                      <CardDescription>
+                        Strong points in both articles
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <ul className="space-y-2">
+                        {analysis.comparisonInsights.bothCoverWell.map(
+                          (point, i) => (
+                            <li
+                              key={i}
+                              className="flex items-start gap-2 text-sm"
+                            >
+                              <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-purple-500" />
+                              <span>{point}</span>
+                            </li>
+                          )
+                        )}
+                      </ul>
+                    </CardContent>
+                  </Card>
+
+                  <Card>
+                    <CardHeader>
+                      <CardTitle className="text-orange-600">
+                        Content Gaps
+                      </CardTitle>
+                      <CardDescription>
+                        Important points neither article covers
+                      </CardDescription>
+                    </CardHeader>
+                    <CardContent>
+                      <ul className="space-y-2">
+                        {analysis.comparisonInsights.gaps.map((point, i) => (
+                          <li
+                            key={i}
+                            className="flex items-start gap-2 text-sm"
+                          >
+                            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" />
+                            <span>{point}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </CardContent>
+                  </Card>
+                </div>
+              </TabsContent>
+
+              <TabsContent value="recommendations" className="space-y-4">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Lightbulb className="h-5 w-5" />
+                      Actionable Recommendations
+                    </CardTitle>
+                    <CardDescription>
+                      Prioritized suggestions for improving your article
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <ScrollArea className="h-[500px] pr-4">
+                      <div className="space-y-4">
+                        {analysis.actionableRecommendations.map(
+                          (rec, index) => (
+                            <Card key={index}>
+                              <CardHeader className="pb-2">
+                                <div className="flex items-start justify-between">
+                                  <CardTitle className="text-base">
+                                    {rec.recommendation}
+                                  </CardTitle>
+                                  {getPriorityBadge(rec.priority)}
+                                </div>
+                              </CardHeader>
+                              <CardContent className="space-y-2">
+                                <div className="flex items-center gap-2 text-sm">
+                                  <span className="text-muted-foreground">
+                                    Effort:
+                                  </span>
+                                  <Badge variant="outline">{rec.effort}</Badge>
+                                </div>
+                                <p className="text-sm text-muted-foreground">
+                                  {rec.impact}
+                                </p>
+                              </CardContent>
+                            </Card>
                           )
                         )}
                       </div>
-                    </div>
-                    <div>
-                      <h4 className="font-semibold">Emotional Impact</h4>
-                      <p className="text-sm text-muted-foreground">
-                        {analysis.toneAnalysis.sourceTone.emotionalImpact}
-                      </p>
-                    </div>
-                    <div>
-                      <h4 className="font-semibold">Appropriateness</h4>
-                      <p className="text-sm text-muted-foreground">
-                        {analysis.toneAnalysis.sourceTone.appropriateness}
-                      </p>
-                    </div>
+                    </ScrollArea>
                   </CardContent>
                 </Card>
+              </TabsContent>
 
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Reference Article Tone</CardTitle>
-                    <CardDescription>
-                      Tone analysis of the reference article
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div>
-                      <h4 className="font-semibold">Primary Tone</h4>
-                      <p className="text-sm text-muted-foreground">
-                        {analysis.toneAnalysis.referenceTone.primaryTone}
-                      </p>
-                    </div>
-                    <div>
-                      <h4 className="font-semibold">Descriptors</h4>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {analysis.toneAnalysis.referenceTone.toneDescriptors.map(
-                          (desc, i) => (
-                            <Badge key={i} variant="secondary">
-                              {desc}
-                            </Badge>
-                          )
-                        )}
+              <TabsContent value="readability" className="space-y-4">
+                <div className="grid gap-4 md:grid-cols-2">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Source Article Readability</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div>
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-sm font-medium">
+                            Reading Level
+                          </span>
+                          <span className="text-sm text-muted-foreground">
+                            {
+                              analysis.readabilityMetrics.source
+                                .estimatedReadingLevel
+                            }
+                          </span>
+                        </div>
                       </div>
-                    </div>
-                    <div>
-                      <h4 className="font-semibold">Emotional Impact</h4>
-                      <p className="text-sm text-muted-foreground">
-                        {analysis.toneAnalysis.referenceTone.emotionalImpact}
-                      </p>
-                    </div>
-                    <div>
-                      <h4 className="font-semibold">Appropriateness</h4>
-                      <p className="text-sm text-muted-foreground">
-                        {analysis.toneAnalysis.referenceTone.appropriateness}
-                      </p>
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-
-              <Card>
-                <CardHeader>
-                  <CardTitle>Tone Comparison</CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <p className="text-muted-foreground">
-                    {analysis.toneAnalysis.toneComparison}
-                  </p>
-                </CardContent>
-              </Card>
-            </TabsContent>
-
-            <TabsContent value="comparison" className="space-y-4">
-              <div className="grid gap-4 md:grid-cols-2">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="text-green-600">
-                      Unique to Source
-                    </CardTitle>
-                    <CardDescription>
-                      Points your article covers that the reference doesn&apos;t
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <ul className="space-y-2">
-                      {analysis.comparisonInsights.uniqueToSource.map(
-                        (point, i) => (
-                          <li
-                            key={i}
-                            className="flex items-start gap-2 text-sm"
-                          >
-                            <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-green-500" />
-                            <span>{point}</span>
-                          </li>
-                        )
-                      )}
-                    </ul>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="text-blue-600">
-                      Unique to Reference
-                    </CardTitle>
-                    <CardDescription>
-                      Points the reference covers that yours doesn&apos;t
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <ul className="space-y-2">
-                      {analysis.comparisonInsights.uniqueToReference.map(
-                        (point, i) => (
-                          <li
-                            key={i}
-                            className="flex items-start gap-2 text-sm"
-                          >
-                            <Lightbulb className="mt-0.5 h-4 w-4 shrink-0 text-blue-500" />
-                            <span>{point}</span>
-                          </li>
-                        )
-                      )}
-                    </ul>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="text-purple-600">
-                      Both Cover Well
-                    </CardTitle>
-                    <CardDescription>
-                      Strong points in both articles
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <ul className="space-y-2">
-                      {analysis.comparisonInsights.bothCoverWell.map(
-                        (point, i) => (
-                          <li
-                            key={i}
-                            className="flex items-start gap-2 text-sm"
-                          >
-                            <CheckCircle className="mt-0.5 h-4 w-4 shrink-0 text-purple-500" />
-                            <span>{point}</span>
-                          </li>
-                        )
-                      )}
-                    </ul>
-                  </CardContent>
-                </Card>
-
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="text-orange-600">
-                      Content Gaps
-                    </CardTitle>
-                    <CardDescription>
-                      Important points neither article covers
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <ul className="space-y-2">
-                      {analysis.comparisonInsights.gaps.map((point, i) => (
-                        <li key={i} className="flex items-start gap-2 text-sm">
-                          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-orange-500" />
-                          <span>{point}</span>
-                        </li>
-                      ))}
-                    </ul>
-                  </CardContent>
-                </Card>
-              </div>
-            </TabsContent>
-
-            <TabsContent value="recommendations" className="space-y-4">
-              <Card>
-                <CardHeader>
-                  <CardTitle className="flex items-center gap-2">
-                    <Lightbulb className="h-5 w-5" />
-                    Actionable Recommendations
-                  </CardTitle>
-                  <CardDescription>
-                    Prioritized suggestions for improving your article
-                  </CardDescription>
-                </CardHeader>
-                <CardContent>
-                  <ScrollArea className="h-[500px] pr-4">
-                    <div className="space-y-4">
-                      {analysis.actionableRecommendations.map((rec, index) => (
-                        <Card key={index}>
-                          <CardHeader className="pb-2">
-                            <div className="flex items-start justify-between">
-                              <CardTitle className="text-base">
-                                {rec.recommendation}
-                              </CardTitle>
-                              {getPriorityBadge(rec.priority)}
-                            </div>
-                          </CardHeader>
-                          <CardContent className="space-y-2">
-                            <div className="flex items-center gap-2 text-sm">
-                              <span className="text-muted-foreground">
-                                Effort:
-                              </span>
-                              <Badge variant="outline">{rec.effort}</Badge>
-                            </div>
-                            <p className="text-sm text-muted-foreground">
-                              {rec.impact}
-                            </p>
-                          </CardContent>
-                        </Card>
-                      ))}
-                    </div>
-                  </ScrollArea>
-                </CardContent>
-              </Card>
-            </TabsContent>
-
-            <TabsContent value="readability" className="space-y-4">
-              <div className="grid gap-4 md:grid-cols-2">
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Source Article Readability</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div>
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-sm font-medium">
-                          Reading Level
-                        </span>
-                        <span className="text-sm text-muted-foreground">
-                          {
+                      <Separator />
+                      <div>
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-sm font-medium">
+                            Sentence Complexity
+                          </span>
+                          <Badge variant="outline">
+                            {
+                              analysis.readabilityMetrics.source
+                                .sentenceComplexity
+                            }
+                          </Badge>
+                        </div>
+                        <Progress
+                          value={
                             analysis.readabilityMetrics.source
-                              .estimatedReadingLevel
+                              .sentenceComplexity === "simple"
+                              ? 33
+                              : analysis.readabilityMetrics.source
+                                    .sentenceComplexity === "moderate"
+                                ? 66
+                                : 100
                           }
-                        </span>
+                          className="h-2"
+                        />
                       </div>
-                    </div>
-                    <Separator />
-                    <div>
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-sm font-medium">
-                          Sentence Complexity
-                        </span>
-                        <Badge variant="outline">
-                          {
+                      <div>
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-sm font-medium">
+                            Vocabulary Level
+                          </span>
+                          <Badge variant="outline">
+                            {analysis.readabilityMetrics.source.vocabularyLevel}
+                          </Badge>
+                        </div>
+                        <Progress
+                          value={
                             analysis.readabilityMetrics.source
-                              .sentenceComplexity
+                              .vocabularyLevel === "basic"
+                              ? 33
+                              : analysis.readabilityMetrics.source
+                                    .vocabularyLevel === "intermediate"
+                                ? 66
+                                : 100
                           }
-                        </Badge>
+                          className="h-2"
+                        />
                       </div>
-                      <Progress
-                        value={
-                          analysis.readabilityMetrics.source
-                            .sentenceComplexity === "simple"
-                            ? 33
-                            : analysis.readabilityMetrics.source
-                                  .sentenceComplexity === "moderate"
-                              ? 66
-                              : 100
-                        }
-                        className="h-2"
-                      />
-                    </div>
-                    <div>
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-sm font-medium">
-                          Vocabulary Level
-                        </span>
-                        <Badge variant="outline">
-                          {analysis.readabilityMetrics.source.vocabularyLevel}
-                        </Badge>
+                      <div>
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-sm font-medium">Pacing</span>
+                          <Badge variant="outline">
+                            {analysis.readabilityMetrics.source.pacing}
+                          </Badge>
+                        </div>
+                        <Progress
+                          value={
+                            analysis.readabilityMetrics.source.pacing === "slow"
+                              ? 33
+                              : analysis.readabilityMetrics.source.pacing ===
+                                  "moderate"
+                                ? 66
+                                : 100
+                          }
+                          className="h-2"
+                        />
                       </div>
-                      <Progress
-                        value={
-                          analysis.readabilityMetrics.source.vocabularyLevel ===
-                          "basic"
-                            ? 33
-                            : analysis.readabilityMetrics.source
-                                  .vocabularyLevel === "intermediate"
-                              ? 66
-                              : 100
-                        }
-                        className="h-2"
-                      />
-                    </div>
-                    <div>
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-sm font-medium">Pacing</span>
-                        <Badge variant="outline">
-                          {analysis.readabilityMetrics.source.pacing}
-                        </Badge>
-                      </div>
-                      <Progress
-                        value={
-                          analysis.readabilityMetrics.source.pacing === "slow"
-                            ? 33
-                            : analysis.readabilityMetrics.source.pacing ===
-                                "moderate"
-                              ? 66
-                              : 100
-                        }
-                        className="h-2"
-                      />
-                    </div>
-                  </CardContent>
-                </Card>
+                    </CardContent>
+                  </Card>
 
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Reference Article Readability</CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div>
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-sm font-medium">
-                          Reading Level
-                        </span>
-                        <span className="text-sm text-muted-foreground">
-                          {
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Reference Article Readability</CardTitle>
+                    </CardHeader>
+                    <CardContent className="space-y-4">
+                      <div>
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-sm font-medium">
+                            Reading Level
+                          </span>
+                          <span className="text-sm text-muted-foreground">
+                            {
+                              analysis.readabilityMetrics.reference
+                                .estimatedReadingLevel
+                            }
+                          </span>
+                        </div>
+                      </div>
+                      <Separator />
+                      <div>
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-sm font-medium">
+                            Sentence Complexity
+                          </span>
+                          <Badge variant="outline">
+                            {
+                              analysis.readabilityMetrics.reference
+                                .sentenceComplexity
+                            }
+                          </Badge>
+                        </div>
+                        <Progress
+                          value={
                             analysis.readabilityMetrics.reference
-                              .estimatedReadingLevel
+                              .sentenceComplexity === "simple"
+                              ? 33
+                              : analysis.readabilityMetrics.reference
+                                    .sentenceComplexity === "moderate"
+                                ? 66
+                                : 100
                           }
-                        </span>
+                          className="h-2"
+                        />
                       </div>
-                    </div>
-                    <Separator />
-                    <div>
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-sm font-medium">
-                          Sentence Complexity
-                        </span>
-                        <Badge variant="outline">
-                          {
+                      <div>
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-sm font-medium">
+                            Vocabulary Level
+                          </span>
+                          <Badge variant="outline">
+                            {
+                              analysis.readabilityMetrics.reference
+                                .vocabularyLevel
+                            }
+                          </Badge>
+                        </div>
+                        <Progress
+                          value={
                             analysis.readabilityMetrics.reference
-                              .sentenceComplexity
+                              .vocabularyLevel === "basic"
+                              ? 33
+                              : analysis.readabilityMetrics.reference
+                                    .vocabularyLevel === "intermediate"
+                                ? 66
+                                : 100
                           }
-                        </Badge>
+                          className="h-2"
+                        />
                       </div>
-                      <Progress
-                        value={
-                          analysis.readabilityMetrics.reference
-                            .sentenceComplexity === "simple"
-                            ? 33
-                            : analysis.readabilityMetrics.reference
-                                  .sentenceComplexity === "moderate"
-                              ? 66
-                              : 100
-                        }
-                        className="h-2"
-                      />
-                    </div>
-                    <div>
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-sm font-medium">
-                          Vocabulary Level
-                        </span>
-                        <Badge variant="outline">
-                          {
-                            analysis.readabilityMetrics.reference
-                              .vocabularyLevel
+                      <div>
+                        <div className="mb-2 flex items-center justify-between">
+                          <span className="text-sm font-medium">Pacing</span>
+                          <Badge variant="outline">
+                            {analysis.readabilityMetrics.reference.pacing}
+                          </Badge>
+                        </div>
+                        <Progress
+                          value={
+                            analysis.readabilityMetrics.reference.pacing ===
+                            "slow"
+                              ? 33
+                              : analysis.readabilityMetrics.reference.pacing ===
+                                  "moderate"
+                                ? 66
+                                : 100
                           }
-                        </Badge>
+                          className="h-2"
+                        />
                       </div>
-                      <Progress
-                        value={
-                          analysis.readabilityMetrics.reference
-                            .vocabularyLevel === "basic"
-                            ? 33
-                            : analysis.readabilityMetrics.reference
-                                  .vocabularyLevel === "intermediate"
-                              ? 66
-                              : 100
-                        }
-                        className="h-2"
-                      />
-                    </div>
-                    <div>
-                      <div className="mb-2 flex items-center justify-between">
-                        <span className="text-sm font-medium">Pacing</span>
-                        <Badge variant="outline">
-                          {analysis.readabilityMetrics.reference.pacing}
-                        </Badge>
-                      </div>
-                      <Progress
-                        value={
-                          analysis.readabilityMetrics.reference.pacing ===
-                          "slow"
-                            ? 33
-                            : analysis.readabilityMetrics.reference.pacing ===
-                                "moderate"
-                              ? 66
-                              : 100
-                        }
-                        className="h-2"
-                      />
-                    </div>
-                  </CardContent>
-                </Card>
-              </div>
-            </TabsContent>
-          </Tabs>
+                    </CardContent>
+                  </Card>
+                </div>
+              </TabsContent>
+            </Tabs>
+          </div>
         )}
       </div>
     </div>
