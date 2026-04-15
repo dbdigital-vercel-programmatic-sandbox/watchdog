@@ -194,6 +194,21 @@ const analysisSchema = z.object({
 export async function POST(req: Request) {
   const requestId = crypto.randomUUID()
   const gatewayApiKey = process.env.APP_BUILDER_VERCEL_AI_GATEWAY
+  const envSnapshot = {
+    nextPublicCdnUrl: process.env.NEXT_PUBLIC_CDN_URL ?? null,
+    nodeEnv: process.env.NODE_ENV ?? null,
+    vercel: process.env.VERCEL ?? null,
+    hasAppBuilderGatewayKey: Boolean(process.env.APP_BUILDER_VERCEL_AI_GATEWAY),
+    hasAIGatewayKey: Boolean(process.env.AI_GATEWAY_API_KEY),
+  }
+
+  console.log(
+    "[api/analyze] Env snapshot\n" +
+      safeJson({
+        requestId,
+        env: envSnapshot,
+      })
+  )
 
   try {
     if (!gatewayApiKey) {
@@ -257,14 +272,7 @@ Be specific, constructive, and provide concrete examples from the text where pos
       error: details,
       context: {
         model: "anthropic/claude-sonnet-4.5",
-        env: {
-          vercel: process.env.VERCEL,
-          hasAppBuilderGatewayKey: Boolean(
-            process.env.APP_BUILDER_VERCEL_AI_GATEWAY
-          ),
-          hasAIGatewayKey: Boolean(process.env.AI_GATEWAY_API_KEY),
-          nodeEnv: process.env.NODE_ENV,
-        },
+        env: envSnapshot,
       },
     }
 
