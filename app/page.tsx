@@ -1,7 +1,15 @@
 "use client"
 
-import { useState } from "react"
+import { useEffect, useMemo, useState } from "react"
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
+import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
@@ -12,9 +20,7 @@ import {
   CardTitle,
 } from "@/components/ui/card"
 import { Badge } from "@/components/ui/badge"
-import { Progress } from "@/components/ui/progress"
 import { ScrollArea } from "@/components/ui/scroll-area"
-import { Separator } from "@/components/ui/separator"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import {
   CheckCircle,
@@ -24,6 +30,11 @@ import {
   BookOpen,
   Sparkles,
   Loader2,
+  WandSparkles,
+  Newspaper,
+  FileText,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react"
 
 interface AnalysisResult {
@@ -65,20 +76,6 @@ interface AnalysisResult {
     effort: string
     impact: string
   }>
-  readabilityMetrics: {
-    source: {
-      estimatedReadingLevel: string
-      sentenceComplexity: string
-      vocabularyLevel: string
-      pacing: string
-    }
-    reference: {
-      estimatedReadingLevel: string
-      sentenceComplexity: string
-      vocabularyLevel: string
-      pacing: string
-    }
-  }
 }
 
 interface UsageMetrics {
@@ -91,6 +88,36 @@ interface UsageMetrics {
   model: string
 }
 
+interface DraftVersion {
+  id: string
+  content: string
+  editorNotes: string
+  appliedRecommendations: string[]
+  createdAt: string
+}
+
+interface HeadlineSuggestion {
+  tone: string
+  headline: string
+  rationale: string
+}
+
+const DRAFT_STORAGE_PREFIX = "article-comparison-drafts"
+
+function hashText(value: string) {
+  let hash = 0
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash * 31 + value.charCodeAt(index)) >>> 0
+  }
+
+  return hash.toString(36)
+}
+
+function getDraftStorageKey(sourceArticle: string, referenceArticle: string) {
+  return `${DRAFT_STORAGE_PREFIX}:${hashText(sourceArticle)}:${hashText(referenceArticle)}`
+}
+
 export default function ArticleComparison() {
   const [sourceArticle, setSourceArticle] = useState("")
   const [referenceArticle, setReferenceArticle] = useState("")
@@ -98,6 +125,111 @@ export default function ArticleComparison() {
   const [usageMetrics, setUsageMetrics] = useState<UsageMetrics | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [openSection, setOpenSection] = useState("articles")
+  const [selectedRecommendations, setSelectedRecommendations] = useState<
+    number[]
+  >([])
+  const [drafts, setDrafts] = useState<DraftVersion[]>([])
+  const [activeDraftId, setActiveDraftId] = useState<string | null>(null)
+  const [isGeneratingDraft, setIsGeneratingDraft] = useState(false)
+  const [draftError, setDraftError] = useState<string | null>(null)
+  const [headlineSuggestions, setHeadlineSuggestions] = useState<
+    HeadlineSuggestion[]
+  >([])
+  const [isGeneratingHeadlines, setIsGeneratingHeadlines] = useState(false)
+  const [headlineError, setHeadlineError] = useState<string | null>(null)
+
+  const draftStorageKey = useMemo(
+    () =>
+      sourceArticle.trim() && referenceArticle.trim()
+        ? getDraftStorageKey(sourceArticle, referenceArticle)
+        : null,
+    [sourceArticle, referenceArticle]
+  )
+
+  const activeDraftIndex = drafts.findIndex(
+    (draft) => draft.id === activeDraftId
+  )
+  const activeDraft = activeDraftIndex >= 0 ? drafts[activeDraftIndex] : null
+  const activeArticle = activeDraft?.content ?? sourceArticle
+  const activeArticleLabel = activeDraft
+    ? `Draft ${activeDraftIndex + 1}`
+    : "Source Article"
+
+  useEffect(() => {
+    if (!draftStorageKey) {
+      setDrafts([])
+      setActiveDraftId(null)
+      return
+    }
+
+    const storedDrafts = window.localStorage.getItem(draftStorageKey)
+
+    if (!storedDrafts) {
+      setDrafts([])
+      setActiveDraftId(null)
+      return
+    }
+
+    try {
+      const parsedDrafts = JSON.parse(storedDrafts) as DraftVersion[]
+
+      if (!Array.isArray(parsedDrafts)) {
+        setDrafts([])
+        setActiveDraftId(null)
+        return
+      }
+
+      setDrafts(parsedDrafts)
+      setActiveDraftId(parsedDrafts.at(-1)?.id ?? null)
+    } catch {
+      setDrafts([])
+      setActiveDraftId(null)
+    }
+  }, [draftStorageKey])
+
+  useEffect(() => {
+    if (!draftStorageKey) {
+      return
+    }
+
+    if (drafts.length === 0) {
+      window.localStorage.removeItem(draftStorageKey)
+      return
+    }
+
+    window.localStorage.setItem(draftStorageKey, JSON.stringify(drafts))
+  }, [drafts, draftStorageKey])
+
+  useEffect(() => {
+    setHeadlineSuggestions([])
+    setHeadlineError(null)
+  }, [activeDraftId, sourceArticle])
+
+  const toggleRecommendation = (index: number, checked: boolean) => {
+    setSelectedRecommendations((current) => {
+      if (checked) {
+        return current.includes(index) ? current : [...current, index]
+      }
+
+      return current.filter((item) => item !== index)
+    })
+  }
+
+  const cycleDraft = (direction: "previous" | "next") => {
+    if (drafts.length === 0) {
+      return
+    }
+
+    const currentIndex =
+      activeDraftIndex >= 0 ? activeDraftIndex : drafts.length - 1
+    const nextIndex =
+      direction === "previous"
+        ? (currentIndex - 1 + drafts.length) % drafts.length
+        : (currentIndex + 1) % drafts.length
+
+    setActiveDraftId(drafts[nextIndex]?.id ?? null)
+  }
 
   const handleAnalyze = async () => {
     if (!sourceArticle.trim() || !referenceArticle.trim()) {
@@ -106,8 +238,13 @@ export default function ArticleComparison() {
     }
 
     setIsAnalyzing(true)
+    setAnalysis(null)
     setError(null)
     setUsageMetrics(null)
+    setSelectedRecommendations([])
+    setDraftError(null)
+    setHeadlineSuggestions([])
+    setHeadlineError(null)
 
     try {
       const response = await fetch("/api/analyze", {
@@ -132,6 +269,8 @@ export default function ArticleComparison() {
 
       setAnalysis(payload.analysis)
       setUsageMetrics(payload.metrics)
+      setSelectedRecommendations([])
+      setOpenSection("")
     } catch (err) {
       setAnalysis(null)
       setError(
@@ -141,6 +280,97 @@ export default function ArticleComparison() {
       )
     } finally {
       setIsAnalyzing(false)
+    }
+  }
+
+  const handleGenerateDraft = async () => {
+    if (!analysis) {
+      return
+    }
+
+    const selectedItems = [...selectedRecommendations]
+      .sort((left, right) => left - right)
+      .map((index) => analysis.actionableRecommendations[index]?.recommendation)
+      .filter((item): item is string => Boolean(item))
+
+    if (selectedItems.length === 0) {
+      setDraftError("Select at least one recommendation")
+      return
+    }
+
+    setIsGeneratingDraft(true)
+    setDraftError(null)
+
+    try {
+      const response = await fetch("/api/rewrite", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourceArticle,
+          referenceArticle,
+          recommendations: selectedItems,
+        }),
+      })
+
+      const payload = await response.json()
+
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Failed to generate improved draft")
+      }
+
+      const nextDraft: DraftVersion = {
+        id: crypto.randomUUID(),
+        content: payload.improvedArticle,
+        editorNotes: payload.editorNotes,
+        appliedRecommendations: payload.appliedRecommendations,
+        createdAt: new Date().toISOString(),
+      }
+
+      setDrafts((current) => [...current, nextDraft])
+      setActiveDraftId(nextDraft.id)
+    } catch (err) {
+      setDraftError(
+        err instanceof Error
+          ? err.message
+          : "An error occurred while generating the improved draft."
+      )
+    } finally {
+      setIsGeneratingDraft(false)
+    }
+  }
+
+  const handleGenerateHeadlines = async () => {
+    if (!activeArticle.trim()) {
+      setHeadlineError("Enter a source article or create a draft first")
+      return
+    }
+
+    setIsGeneratingHeadlines(true)
+    setHeadlineSuggestions([])
+    setHeadlineError(null)
+
+    try {
+      const response = await fetch("/api/headlines", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ article: activeArticle }),
+      })
+
+      const payload = await response.json()
+
+      if (!response.ok) {
+        throw new Error(payload?.error ?? "Failed to generate headlines")
+      }
+
+      setHeadlineSuggestions(payload.headlines)
+    } catch (err) {
+      setHeadlineError(
+        err instanceof Error
+          ? err.message
+          : "An error occurred while generating headlines."
+      )
+    } finally {
+      setIsGeneratingHeadlines(false)
     }
   }
 
@@ -212,47 +442,70 @@ export default function ArticleComparison() {
           </p>
         </div>
 
-        <div className="grid gap-6 lg:grid-cols-2">
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <BookOpen className="h-5 w-5" />
-                Source Article
-              </CardTitle>
-              <CardDescription>
-                The article you want to analyze and improve
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Textarea
-                placeholder="Paste your source article here..."
-                value={sourceArticle}
-                onChange={(e) => setSourceArticle(e.target.value)}
-                className="min-h-[300px] resize-none"
-              />
-            </CardContent>
-          </Card>
+        <Accordion
+          type="single"
+          collapsible
+          value={openSection}
+          onValueChange={setOpenSection}
+        >
+          <AccordionItem value="articles" className="rounded-xl border px-6">
+            <AccordionTrigger className="py-4 hover:no-underline">
+              <div className="space-y-1 text-left">
+                <div className="text-base font-semibold">
+                  Source and Reference Articles
+                </div>
+                <p className="text-sm font-normal text-muted-foreground">
+                  {analysis
+                    ? "Collapsed so the analysis stays in focus. Expand to review or edit the articles."
+                    : "Paste the source article and the reference article you want to compare."}
+                </p>
+              </div>
+            </AccordionTrigger>
+            <AccordionContent className="pb-4">
+              <div className="grid gap-6 lg:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <BookOpen className="h-5 w-5" />
+                      Source Article
+                    </CardTitle>
+                    <CardDescription>
+                      The article you want to analyze and improve
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <Textarea
+                      placeholder="Paste your source article here..."
+                      value={sourceArticle}
+                      onChange={(e) => setSourceArticle(e.target.value)}
+                      className="field-sizing-fixed h-[300px] resize-none overflow-y-auto"
+                    />
+                  </CardContent>
+                </Card>
 
-          <Card>
-            <CardHeader>
-              <CardTitle className="flex items-center gap-2">
-                <Sparkles className="h-5 w-5" />
-                Reference Article
-              </CardTitle>
-              <CardDescription>
-                The benchmark article for comparison
-              </CardDescription>
-            </CardHeader>
-            <CardContent>
-              <Textarea
-                placeholder="Paste your reference article here..."
-                value={referenceArticle}
-                onChange={(e) => setReferenceArticle(e.target.value)}
-                className="min-h-[300px] resize-none"
-              />
-            </CardContent>
-          </Card>
-        </div>
+                <Card>
+                  <CardHeader>
+                    <CardTitle className="flex items-center gap-2">
+                      <Sparkles className="h-5 w-5" />
+                      Reference Article
+                    </CardTitle>
+                    <CardDescription>
+                      The benchmark article for comparison
+                    </CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <Textarea
+                      placeholder="Paste your reference article here..."
+                      value={referenceArticle}
+                      onChange={(e) => setReferenceArticle(e.target.value)}
+                      className="field-sizing-fixed h-[300px] resize-none overflow-y-auto"
+                    />
+                  </CardContent>
+                </Card>
+              </div>
+            </AccordionContent>
+          </AccordionItem>
+        </Accordion>
 
         <div className="flex justify-center">
           <Button
@@ -281,6 +534,175 @@ export default function ArticleComparison() {
             <AlertTitle>Error</AlertTitle>
             <AlertDescription>{error}</AlertDescription>
           </Alert>
+        )}
+
+        {sourceArticle.trim() && (
+          <div className="grid gap-4 xl:grid-cols-[1.5fr_1fr]">
+            <Card>
+              <CardHeader>
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                  <div>
+                    <CardTitle className="flex items-center gap-2">
+                      <FileText className="h-5 w-5" />
+                      Draft Workspace
+                    </CardTitle>
+                    <CardDescription>
+                      Review the source article or cycle through saved generated
+                      drafts stored in this browser.
+                    </CardDescription>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Badge variant={activeDraft ? "default" : "secondary"}>
+                      {activeArticleLabel}
+                    </Badge>
+                    {drafts.length > 0 && (
+                      <Badge variant="outline">
+                        {drafts.length} saved drafts
+                      </Badge>
+                    )}
+                  </div>
+                </div>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setActiveDraftId(null)}
+                    disabled={!activeDraft}
+                  >
+                    View Source
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => cycleDraft("previous")}
+                    disabled={drafts.length === 0}
+                  >
+                    <ChevronLeft className="h-4 w-4" />
+                    Previous Draft
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => cycleDraft("next")}
+                    disabled={drafts.length === 0}
+                  >
+                    Next Draft
+                    <ChevronRight className="h-4 w-4" />
+                  </Button>
+                  {activeDraft && (
+                    <span className="text-sm text-muted-foreground">
+                      Draft {activeDraftIndex + 1} of {drafts.length}
+                    </span>
+                  )}
+                </div>
+
+                <Textarea
+                  value={activeArticle}
+                  readOnly
+                  className="field-sizing-fixed h-[360px] resize-none overflow-y-auto"
+                />
+
+                {activeDraft && (
+                  <div className="space-y-3 rounded-lg border p-4">
+                    <div>
+                      <p className="text-sm font-medium">Editor Notes</p>
+                      <p className="text-sm text-muted-foreground">
+                        {activeDraft.editorNotes}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-sm font-medium">
+                        Applied Recommendations
+                      </p>
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {activeDraft.appliedRecommendations.map(
+                          (item, index) => (
+                            <Badge
+                              key={`${activeDraft.id}-${index}`}
+                              variant="outline"
+                            >
+                              {item}
+                            </Badge>
+                          )
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card>
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2">
+                  <Newspaper className="h-5 w-5" />
+                  Headline Ideas
+                </CardTitle>
+                <CardDescription>
+                  Generate headlines for the current active draft or fall back
+                  to the source article.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <Button
+                  onClick={handleGenerateHeadlines}
+                  disabled={isGeneratingHeadlines || !activeArticle.trim()}
+                  className="w-full"
+                >
+                  {isGeneratingHeadlines ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Generating Headlines...
+                    </>
+                  ) : (
+                    <>
+                      <WandSparkles className="mr-2 h-4 w-4" />
+                      Generate Headlines for {activeArticleLabel}
+                    </>
+                  )}
+                </Button>
+
+                {headlineError && (
+                  <Alert variant="destructive">
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertTitle>Headline Generation Failed</AlertTitle>
+                    <AlertDescription>{headlineError}</AlertDescription>
+                  </Alert>
+                )}
+
+                <div className="space-y-3">
+                  {headlineSuggestions.length === 0 ? (
+                    <p className="text-sm text-muted-foreground">
+                      Generate three options in sensational, factual, and
+                      authoritative tones.
+                    </p>
+                  ) : (
+                    headlineSuggestions.map((item, index) => (
+                      <Card key={`${item.tone}-${index}`}>
+                        <CardHeader className="pb-2">
+                          <div className="flex items-center justify-between gap-2">
+                            <CardTitle className="text-base">
+                              {item.headline}
+                            </CardTitle>
+                            <Badge variant="outline" className="text-xs">
+                              {item.tone}
+                            </Badge>
+                          </div>
+                        </CardHeader>
+                        <CardContent>
+                          <p className="text-sm text-muted-foreground">
+                            {item.rationale}
+                          </p>
+                        </CardContent>
+                      </Card>
+                    ))
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
         )}
 
         {analysis && (
@@ -346,7 +768,7 @@ export default function ArticleComparison() {
             )}
 
             <Tabs defaultValue="strengths" className="space-y-4">
-              <TabsList className="grid w-full grid-cols-2 md:grid-cols-4 lg:grid-cols-6">
+              <TabsList className="grid w-full grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
                 <TabsTrigger value="strengths">Strengths</TabsTrigger>
                 <TabsTrigger value="weaknesses">Weaknesses</TabsTrigger>
                 <TabsTrigger value="tone">Tone Analysis</TabsTrigger>
@@ -354,7 +776,6 @@ export default function ArticleComparison() {
                 <TabsTrigger value="recommendations">
                   Recommendations
                 </TabsTrigger>
-                <TabsTrigger value="readability">Readability</TabsTrigger>
               </TabsList>
 
               <TabsContent value="strengths" className="space-y-4">
@@ -673,222 +1094,106 @@ export default function ArticleComparison() {
                       Prioritized suggestions for improving your article
                     </CardDescription>
                   </CardHeader>
-                  <CardContent>
+                  <CardContent className="space-y-4">
+                    <div className="flex flex-col gap-3 rounded-lg border p-4 lg:flex-row lg:items-center lg:justify-between">
+                      <div>
+                        <p className="font-medium">Selected recommendations</p>
+                        <p className="text-sm text-muted-foreground">
+                          Choose one or more recommendations, then generate a
+                          full improved draft that applies them together.
+                        </p>
+                      </div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <Badge variant="outline">
+                          {selectedRecommendations.length} selected
+                        </Badge>
+                        <Button
+                          onClick={handleGenerateDraft}
+                          disabled={
+                            isGeneratingDraft ||
+                            selectedRecommendations.length === 0
+                          }
+                        >
+                          {isGeneratingDraft ? (
+                            <>
+                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                              Generating Draft...
+                            </>
+                          ) : (
+                            <>
+                              <WandSparkles className="mr-2 h-4 w-4" />
+                              Generate Improved Draft
+                            </>
+                          )}
+                        </Button>
+                      </div>
+                    </div>
+
+                    {draftError && (
+                      <Alert variant="destructive">
+                        <AlertTriangle className="h-4 w-4" />
+                        <AlertTitle>Draft Generation Failed</AlertTitle>
+                        <AlertDescription>{draftError}</AlertDescription>
+                      </Alert>
+                    )}
+
                     <ScrollArea className="h-[500px] pr-4">
                       <div className="space-y-4">
                         {analysis.actionableRecommendations.map(
-                          (rec, index) => (
-                            <Card key={index}>
-                              <CardHeader className="pb-2">
-                                <div className="flex items-start justify-between">
-                                  <CardTitle className="text-base">
-                                    {rec.recommendation}
-                                  </CardTitle>
-                                  {getPriorityBadge(rec.priority)}
-                                </div>
-                              </CardHeader>
-                              <CardContent className="space-y-2">
-                                <div className="flex items-center gap-2 text-sm">
-                                  <span className="text-muted-foreground">
-                                    Effort:
-                                  </span>
-                                  <Badge variant="outline">{rec.effort}</Badge>
-                                </div>
-                                <p className="text-sm text-muted-foreground">
-                                  {rec.impact}
-                                </p>
-                              </CardContent>
-                            </Card>
-                          )
+                          (rec, index) => {
+                            const checkboxId = `recommendation-${index}`
+
+                            return (
+                              <Card key={index}>
+                                <CardHeader className="pb-2">
+                                  <div className="flex items-start gap-3">
+                                    <Checkbox
+                                      id={checkboxId}
+                                      checked={selectedRecommendations.includes(
+                                        index
+                                      )}
+                                      onCheckedChange={(checked) =>
+                                        toggleRecommendation(
+                                          index,
+                                          checked === true
+                                        )
+                                      }
+                                      className="mt-1"
+                                    />
+                                    <div className="flex-1 space-y-2">
+                                      <div className="flex items-start justify-between gap-3">
+                                        <Label
+                                          htmlFor={checkboxId}
+                                          className="cursor-pointer items-start text-base leading-6"
+                                        >
+                                          {rec.recommendation}
+                                        </Label>
+                                        {getPriorityBadge(rec.priority)}
+                                      </div>
+                                      <div className="flex items-center gap-2 text-sm">
+                                        <span className="text-muted-foreground">
+                                          Effort:
+                                        </span>
+                                        <Badge variant="outline">
+                                          {rec.effort}
+                                        </Badge>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </CardHeader>
+                                <CardContent>
+                                  <p className="text-sm text-muted-foreground">
+                                    {rec.impact}
+                                  </p>
+                                </CardContent>
+                              </Card>
+                            )
+                          }
                         )}
                       </div>
                     </ScrollArea>
                   </CardContent>
                 </Card>
-              </TabsContent>
-
-              <TabsContent value="readability" className="space-y-4">
-                <div className="grid gap-4 md:grid-cols-2">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>Source Article Readability</CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                      <div>
-                        <div className="mb-2 flex items-center justify-between">
-                          <span className="text-sm font-medium">
-                            Reading Level
-                          </span>
-                          <span className="text-sm text-muted-foreground">
-                            {
-                              analysis.readabilityMetrics.source
-                                .estimatedReadingLevel
-                            }
-                          </span>
-                        </div>
-                      </div>
-                      <Separator />
-                      <div>
-                        <div className="mb-2 flex items-center justify-between">
-                          <span className="text-sm font-medium">
-                            Sentence Complexity
-                          </span>
-                          <Badge variant="outline">
-                            {
-                              analysis.readabilityMetrics.source
-                                .sentenceComplexity
-                            }
-                          </Badge>
-                        </div>
-                        <Progress
-                          value={
-                            analysis.readabilityMetrics.source
-                              .sentenceComplexity === "simple"
-                              ? 33
-                              : analysis.readabilityMetrics.source
-                                    .sentenceComplexity === "moderate"
-                                ? 66
-                                : 100
-                          }
-                          className="h-2"
-                        />
-                      </div>
-                      <div>
-                        <div className="mb-2 flex items-center justify-between">
-                          <span className="text-sm font-medium">
-                            Vocabulary Level
-                          </span>
-                          <Badge variant="outline">
-                            {analysis.readabilityMetrics.source.vocabularyLevel}
-                          </Badge>
-                        </div>
-                        <Progress
-                          value={
-                            analysis.readabilityMetrics.source
-                              .vocabularyLevel === "basic"
-                              ? 33
-                              : analysis.readabilityMetrics.source
-                                    .vocabularyLevel === "intermediate"
-                                ? 66
-                                : 100
-                          }
-                          className="h-2"
-                        />
-                      </div>
-                      <div>
-                        <div className="mb-2 flex items-center justify-between">
-                          <span className="text-sm font-medium">Pacing</span>
-                          <Badge variant="outline">
-                            {analysis.readabilityMetrics.source.pacing}
-                          </Badge>
-                        </div>
-                        <Progress
-                          value={
-                            analysis.readabilityMetrics.source.pacing === "slow"
-                              ? 33
-                              : analysis.readabilityMetrics.source.pacing ===
-                                  "moderate"
-                                ? 66
-                                : 100
-                          }
-                          className="h-2"
-                        />
-                      </div>
-                    </CardContent>
-                  </Card>
-
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>Reference Article Readability</CardTitle>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                      <div>
-                        <div className="mb-2 flex items-center justify-between">
-                          <span className="text-sm font-medium">
-                            Reading Level
-                          </span>
-                          <span className="text-sm text-muted-foreground">
-                            {
-                              analysis.readabilityMetrics.reference
-                                .estimatedReadingLevel
-                            }
-                          </span>
-                        </div>
-                      </div>
-                      <Separator />
-                      <div>
-                        <div className="mb-2 flex items-center justify-between">
-                          <span className="text-sm font-medium">
-                            Sentence Complexity
-                          </span>
-                          <Badge variant="outline">
-                            {
-                              analysis.readabilityMetrics.reference
-                                .sentenceComplexity
-                            }
-                          </Badge>
-                        </div>
-                        <Progress
-                          value={
-                            analysis.readabilityMetrics.reference
-                              .sentenceComplexity === "simple"
-                              ? 33
-                              : analysis.readabilityMetrics.reference
-                                    .sentenceComplexity === "moderate"
-                                ? 66
-                                : 100
-                          }
-                          className="h-2"
-                        />
-                      </div>
-                      <div>
-                        <div className="mb-2 flex items-center justify-between">
-                          <span className="text-sm font-medium">
-                            Vocabulary Level
-                          </span>
-                          <Badge variant="outline">
-                            {
-                              analysis.readabilityMetrics.reference
-                                .vocabularyLevel
-                            }
-                          </Badge>
-                        </div>
-                        <Progress
-                          value={
-                            analysis.readabilityMetrics.reference
-                              .vocabularyLevel === "basic"
-                              ? 33
-                              : analysis.readabilityMetrics.reference
-                                    .vocabularyLevel === "intermediate"
-                                ? 66
-                                : 100
-                          }
-                          className="h-2"
-                        />
-                      </div>
-                      <div>
-                        <div className="mb-2 flex items-center justify-between">
-                          <span className="text-sm font-medium">Pacing</span>
-                          <Badge variant="outline">
-                            {analysis.readabilityMetrics.reference.pacing}
-                          </Badge>
-                        </div>
-                        <Progress
-                          value={
-                            analysis.readabilityMetrics.reference.pacing ===
-                            "slow"
-                              ? 33
-                              : analysis.readabilityMetrics.reference.pacing ===
-                                  "moderate"
-                                ? 66
-                                : 100
-                          }
-                          className="h-2"
-                        />
-                      </div>
-                    </CardContent>
-                  </Card>
-                </div>
               </TabsContent>
             </Tabs>
           </div>

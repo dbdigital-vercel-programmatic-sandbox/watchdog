@@ -248,25 +248,6 @@ const analysisSchema = z.object({
       })
     )
     .describe("Prioritized list of recommendations for the source article"),
-
-  readabilityMetrics: z.object({
-    source: z.object({
-      estimatedReadingLevel: z
-        .string()
-        .describe("Estimated reading level (e.g., '8th grade', 'college')"),
-      sentenceComplexity: z.enum(["simple", "moderate", "complex"]),
-      vocabularyLevel: z.enum(["basic", "intermediate", "advanced"]),
-      pacing: z
-        .enum(["slow", "moderate", "fast"])
-        .describe("Speed at which information is delivered"),
-    }),
-    reference: z.object({
-      estimatedReadingLevel: z.string(),
-      sentenceComplexity: z.enum(["simple", "moderate", "complex"]),
-      vocabularyLevel: z.enum(["basic", "intermediate", "advanced"]),
-      pacing: z.enum(["slow", "moderate", "fast"]),
-    }),
-  }),
 })
 
 export async function POST(req: Request) {
@@ -338,7 +319,6 @@ Provide a detailed analysis covering:
 3. Tone analysis for both articles with comparison
 4. Comparison insights showing unique points and gaps
 5. Actionable, prioritized recommendations for improving the source
-6. Readability metrics for both articles
 
 Be specific, constructive, and provide concrete examples from the text where possible.`,
     })
