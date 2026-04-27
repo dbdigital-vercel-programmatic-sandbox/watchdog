@@ -132,48 +132,44 @@ function toErrorDetails(error: unknown) {
 }
 
 const analysisSchema = z.object({
-  strengths: z
+  factualDifferences: z
     .array(
       z.object({
-        point: z
+        summary: z
           .string()
-          .describe("Specific strength or what the article does well"),
-        explanation: z
-          .string()
-          .describe("Detailed explanation of why this is a strength"),
-        category: z.enum([
-          "clarity",
-          "engagement",
-          "structure",
-          "credibility",
-          "originality",
+          .describe(
+            "Short description of the factual or informational difference"
+          ),
+        type: z.enum(["missing_in_source", "mismatch"]),
+        kind: z.enum([
+          "stat",
+          "figure",
+          "date",
+          "name",
+          "claim",
+          "quote",
           "other",
         ]),
+        sourceText: z
+          .string()
+          .nullable()
+          .describe(
+            "Exact or near-exact source detail involved in the difference"
+          ),
+        referenceText: z
+          .string()
+          .nullable()
+          .describe(
+            "Exact or near-exact reference detail involved in the difference"
+          ),
+        impact: z
+          .string()
+          .describe("Why this factual difference matters to the article"),
       })
     )
-    .describe("List of what the source article does well"),
-
-  weaknesses: z
-    .array(
-      z.object({
-        point: z
-          .string()
-          .describe("Specific weakness or what the article lacks"),
-        explanation: z
-          .string()
-          .describe("Detailed explanation of the weakness and how to improve"),
-        category: z.enum([
-          "clarity",
-          "engagement",
-          "structure",
-          "credibility",
-          "completeness",
-          "other",
-        ]),
-        severity: z.enum(["low", "medium", "high"]),
-      })
-    )
-    .describe("List of what the source article lacks or could improve"),
+    .describe(
+      "Reference-backed factual, statistical, date, figure, and information differences missing from or conflicting with the source"
+    ),
 
   toneAnalysis: z.object({
     sourceTone: z.object({
@@ -314,11 +310,18 @@ ${referenceArticle}
 """
 
 Provide a detailed analysis covering:
-1. What the source article does well (strengths)
-2. What the source article lacks or could improve (weaknesses)
-3. Tone analysis for both articles with comparison
-4. Comparison insights showing unique points and gaps
-5. Actionable, prioritized recommendations for improving the source
+1. Factual differences between the source and reference articles
+2. Tone analysis for both articles with comparison
+3. Comparison insights showing unique points and gaps
+4. Actionable, prioritized recommendations for improving the source
+
+For factualDifferences:
+- Focus on facts, figures, dates, names, counts, claims, quotes, and concrete informational differences.
+- Set kind to the best matching value for each factual difference.
+- Include only information that is present in the reference article and either missing from the source or conflicts with the source.
+- Do not include source-only details, source strengths, or anything that is merely good writing in the source.
+- Prefer high-value differences that would materially improve accuracy or completeness.
+- Use sourceText and referenceText whenever possible.
 
 Be specific, constructive, and provide concrete examples from the text where possible.`,
     })
