@@ -9,6 +9,7 @@ import {
 } from "@/components/ui/accordion"
 import { Button } from "@/components/ui/button"
 import { Checkbox } from "@/components/ui/checkbox"
+import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -32,6 +33,9 @@ import {
   WandSparkles,
   Newspaper,
   FileText,
+  Link2,
+  ImageIcon,
+  Video,
   ChevronLeft,
   ChevronRight,
   Plus,
@@ -91,7 +95,7 @@ interface DraftVersion {
   editorNotes: string
   appliedRecommendations: string[]
   createdAt: string
-  mode: "full-rewrite" | "patches"
+  mode: "full-rewrite" | "patches" | "finalized-patches"
   baseContent: string
   pendingChanges: DraftChange[]
 }
@@ -130,6 +134,28 @@ interface HeadlineSuggestion {
   rationale: string
 }
 
+interface ScrapedArticleMediaItem {
+  type: "image" | "video" | "embed"
+  url: string
+  alt: string | null
+  caption: string | null
+  poster: string | null
+}
+
+interface ScrapedArticlePayload {
+  title: string | null
+  description: string | null
+  body: string
+  media: ScrapedArticleMediaItem[]
+}
+
+interface ScrapePayload {
+  blocked: boolean
+  finalUrl: string
+  reasons: string[]
+  article: ScrapedArticlePayload | null
+}
+
 const DRAFT_STORAGE_PREFIX = "article-comparison-drafts"
 
 function hashText(value: string) {
@@ -144,6 +170,65 @@ function hashText(value: string) {
 
 function getDraftStorageKey(sourceArticle: string, referenceArticle: string) {
   return `${DRAFT_STORAGE_PREFIX}:${hashText(sourceArticle)}:${hashText(referenceArticle)}`
+}
+
+function isValidHttpUrl(value: string) {
+  try {
+    const url = new URL(value)
+
+    return url.protocol === "http:" || url.protocol === "https:"
+  } catch {
+    return false
+  }
+}
+
+function formatScrapedArticleForAnalysis(article: ScrapedArticlePayload) {
+  const sections = [article.title, article.description, article.body].filter(
+    (value): value is string => Boolean(value?.trim())
+  )
+
+  if (article.media.length > 0) {
+    sections.push(
+      [
+        "Embedded media in article body:",
+        ...article.media.map((item, index) => {
+          const details = [
+            item.type,
+            item.caption,
+            item.alt,
+            item.url,
+            item.poster,
+          ].filter((value): value is string => Boolean(value?.trim()))
+
+          return `${index + 1}. ${details.join(" | ")}`
+        }),
+      ].join("\n")
+    )
+  }
+
+  return sections.join("\n\n")
+}
+
+function buildScrapeError(
+  label: string,
+  payload: { error?: string } | ScrapePayload
+) {
+  if ("error" in payload && payload.error) {
+    return `${label}: ${payload.error}`
+  }
+
+  if (!("article" in payload)) {
+    return `${label}: Failed to scrape the article.`
+  }
+
+  if (payload.blocked || !payload.article) {
+    const reason =
+      payload.reasons[0] ?? "Readable article content was not extracted."
+
+    return `${label}: ${reason}`
+  }
+
+  return null
 }
 
 function normalizeDraft(draft: DraftVersion): DraftVersion {
@@ -455,9 +540,104 @@ function buildChangePreview(article: string, changes: DraftChange[]) {
   return parts.filter((part) => part.type !== "text" || part.content.length > 0)
 }
 
+type DiffSegment = {
+  type: "equal" | "removed" | "added"
+  text: string
+}
+
+function tokenizeTextForDiff(text: string) {
+  const normalized = text.replace(/\r\n/g, "\n")
+  const sentenceTokens = normalized.match(/[^.!?\n]+[.!?]?[\s]*/g)
+
+  if (sentenceTokens && sentenceTokens.length > 0) {
+    return sentenceTokens.filter((token) => token.length > 0)
+  }
+
+  return normalized ? [normalized] : []
+}
+
+function buildDiffSegments(source: string, draft: string): DiffSegment[] {
+  const sourceTokens = tokenizeTextForDiff(source)
+  const draftTokens = tokenizeTextForDiff(draft)
+  const rows = sourceTokens.length
+  const columns = draftTokens.length
+  const table = Array.from({ length: rows + 1 }, () =>
+    Array<number>(columns + 1).fill(0)
+  )
+
+  for (let row = rows - 1; row >= 0; row -= 1) {
+    for (let column = columns - 1; column >= 0; column -= 1) {
+      if (sourceTokens[row] === draftTokens[column]) {
+        table[row][column] = table[row + 1][column + 1] + 1
+      } else {
+        table[row][column] = Math.max(
+          table[row + 1][column],
+          table[row][column + 1]
+        )
+      }
+    }
+  }
+
+  const segments: DiffSegment[] = []
+  let row = 0
+  let column = 0
+
+  const pushSegment = (type: DiffSegment["type"], text: string) => {
+    if (!text) {
+      return
+    }
+
+    const previous = segments.at(-1)
+
+    if (previous?.type === type) {
+      previous.text += text
+      return
+    }
+
+    segments.push({ type, text })
+  }
+
+  while (row < rows && column < columns) {
+    if (sourceTokens[row] === draftTokens[column]) {
+      pushSegment("equal", sourceTokens[row])
+      row += 1
+      column += 1
+      continue
+    }
+
+    if (table[row + 1][column] >= table[row][column + 1]) {
+      pushSegment("removed", sourceTokens[row])
+      row += 1
+    } else {
+      pushSegment("added", draftTokens[column])
+      column += 1
+    }
+  }
+
+  while (row < rows) {
+    pushSegment("removed", sourceTokens[row])
+    row += 1
+  }
+
+  while (column < columns) {
+    pushSegment("added", draftTokens[column])
+    column += 1
+  }
+
+  return segments
+}
+
 export default function ArticleComparison() {
   const [sourceArticle, setSourceArticle] = useState("")
   const [referenceArticle, setReferenceArticle] = useState("")
+  const [articleInputMode, setArticleInputMode] = useState("paste")
+  const [sourceUrl, setSourceUrl] = useState("")
+  const [referenceUrl, setReferenceUrl] = useState("")
+  const [sourceScrape, setSourceScrape] =
+    useState<ScrapedArticlePayload | null>(null)
+  const [referenceScrape, setReferenceScrape] =
+    useState<ScrapedArticlePayload | null>(null)
+  const [isScrapingUrls, setIsScrapingUrls] = useState(false)
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null)
   const [usageMetrics, setUsageMetrics] = useState<UsageMetrics | null>(null)
   const [isAnalyzing, setIsAnalyzing] = useState(false)
@@ -509,9 +689,7 @@ export default function ArticleComparison() {
     activeInsertionIndex >= 0
       ? pendingReviewQueue[activeInsertionIndex]
       : (pendingReviewQueue[0] ?? null)
-  const isPatchReviewActive = Boolean(
-    patchDraft && pendingReviewQueue.length > 0
-  )
+  const isPatchReviewSession = Boolean(patchDraft)
   const keptInsertionCount = reviewQueue.filter(
     (item) => item.status === "kept"
   ).length
@@ -521,8 +699,6 @@ export default function ArticleComparison() {
   const unresolvedInsertionCount = reviewQueue.filter(
     (item) => item.status === "unresolved"
   ).length
-  const reviewedInsertionCount =
-    keptInsertionCount + discardedInsertionCount + unresolvedInsertionCount
   const inlineInsertionPreview = useMemo(
     () =>
       patchDraft
@@ -530,6 +706,22 @@ export default function ArticleComparison() {
         : [],
     [patchDraft]
   )
+  const diffSegments = useMemo(
+    () => buildDiffSegments(sourceArticle, activeArticle),
+    [sourceArticle, activeArticle]
+  )
+  const sourceDiffSegments = diffSegments.filter(
+    (segment) => segment.type !== "added"
+  )
+  const draftDiffSegments = diffSegments.filter(
+    (segment) => segment.type !== "removed"
+  )
+  const addedSegmentCount = diffSegments.filter(
+    (segment) => segment.type === "added"
+  ).length
+  const removedSegmentCount = diffSegments.filter(
+    (segment) => segment.type === "removed"
+  ).length
   const activeArticleLabel = activeDraft
     ? `Draft ${activeDraftIndex + 1}`
     : "Source Article"
@@ -657,8 +849,11 @@ export default function ArticleComparison() {
     )
   }
 
-  const analyzeArticle = async (articleToAnalyze: string) => {
-    if (!articleToAnalyze.trim() || !referenceArticle.trim()) {
+  const analyzeArticle = async (
+    articleToAnalyze: string,
+    referenceToAnalyze = referenceArticle
+  ) => {
+    if (!articleToAnalyze.trim() || !referenceToAnalyze.trim()) {
       setError("Please enter both source and reference articles")
       return
     }
@@ -678,7 +873,7 @@ export default function ArticleComparison() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           sourceArticle: articleToAnalyze,
-          referenceArticle,
+          referenceArticle: referenceToAnalyze,
         }),
       })
 
@@ -715,11 +910,99 @@ export default function ArticleComparison() {
   }
 
   const handleAnalyze = async () => {
+    if (drafts.length > 0) {
+      const confirmed = window.confirm(
+        "Analyzing again will reset the current workspace and remove saved drafts for this source/reference pair. Do you want to continue?"
+      )
+
+      if (!confirmed) {
+        return
+      }
+
+      setDrafts([])
+      setActiveDraftId(null)
+    }
+
     await analyzeArticle(sourceArticle)
   }
 
   const handleAnalyzeDraft = async () => {
     await analyzeArticle(activeArticle)
+  }
+
+  const handleCompareUrls = async () => {
+    if (!isValidHttpUrl(sourceUrl) || !isValidHttpUrl(referenceUrl)) {
+      setError("Please enter two valid article URLs")
+      return
+    }
+
+    if (drafts.length > 0) {
+      const confirmed = window.confirm(
+        "Scraping new URLs will reset the current workspace and remove saved drafts for this source/reference pair. Do you want to continue?"
+      )
+
+      if (!confirmed) {
+        return
+      }
+
+      setDrafts([])
+      setActiveDraftId(null)
+    }
+
+    setIsScrapingUrls(true)
+    setError(null)
+    setSourceScrape(null)
+    setReferenceScrape(null)
+
+    try {
+      const [sourceResponse, referenceResponse] = await Promise.all([
+        fetch("/api/scrape", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: sourceUrl }),
+        }),
+        fetch("/api/scrape", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ url: referenceUrl }),
+        }),
+      ])
+
+      const [sourcePayload, referencePayload] = (await Promise.all([
+        sourceResponse.json(),
+        referenceResponse.json(),
+      ])) as Array<ScrapePayload | { error?: string }>
+
+      const sourceError = buildScrapeError("Source URL", sourcePayload)
+      const referenceError = buildScrapeError("Reference URL", referencePayload)
+
+      if (sourceError || referenceError) {
+        throw new Error([sourceError, referenceError].filter(Boolean).join(" "))
+      }
+
+      const nextSourceArticle = formatScrapedArticleForAnalysis(
+        (sourcePayload as ScrapePayload).article as ScrapedArticlePayload
+      )
+      const nextReferenceArticle = formatScrapedArticleForAnalysis(
+        (referencePayload as ScrapePayload).article as ScrapedArticlePayload
+      )
+
+      setSourceScrape((sourcePayload as ScrapePayload).article)
+      setReferenceScrape((referencePayload as ScrapePayload).article)
+      setSourceArticle(nextSourceArticle)
+      setReferenceArticle(nextReferenceArticle)
+
+      await analyzeArticle(nextSourceArticle, nextReferenceArticle)
+    } catch (err) {
+      setAnalysis(null)
+      setError(
+        err instanceof Error
+          ? err.message
+          : "An error occurred while scraping the article URLs."
+      )
+    } finally {
+      setIsScrapingUrls(false)
+    }
   }
 
   const handleGenerateDraft = async () => {
@@ -882,64 +1165,100 @@ export default function ArticleComparison() {
     setActiveInsertionId(pendingReviewQueue[nextIndex]?.id ?? null)
   }
 
-  const resolveInsertion = (decision: "kept" | "discarded") => {
-    if (!activeDraftId || !patchDraft || !activeInsertion) {
+  const resolveInsertionById = (
+    changeId: string,
+    decision: "kept" | "discarded"
+  ) => {
+    if (!activeDraftId || !patchDraft) {
       return
     }
 
     setDraftError(null)
 
-    if (decision === "discarded") {
-      setDrafts((current) =>
-        current.map((draft) =>
-          draft.id === activeDraftId
-            ? {
-                ...draft,
-                pendingChanges: draft.pendingChanges.map((item) =>
-                  item.id === activeInsertion.id
-                    ? { ...item, status: "discarded" }
-                    : item
-                ),
-              }
-            : draft
-        )
+    setDrafts((current) =>
+      current.map((draft) =>
+        draft.id === activeDraftId
+          ? {
+              ...draft,
+              pendingChanges: draft.pendingChanges.map((item) =>
+                item.id === changeId ? { ...item, status: decision } : item
+              ),
+            }
+          : draft
       )
+    )
+  }
 
+  const resolveInsertion = (decision: "kept" | "discarded") => {
+    if (!activeInsertion) {
       return
     }
 
-    const nextContent = applyChangeToDraft(patchDraft.content, activeInsertion)
+    resolveInsertionById(activeInsertion.id, decision)
+  }
 
-    setDrafts((current) =>
-      current.map((draft) => {
-        if (draft.id !== activeDraftId) {
-          return draft
-        }
+  const handleEndReview = () => {
+    if (!activeDraftId || !patchDraft) {
+      return
+    }
 
-        if (!nextContent) {
-          return {
-            ...draft,
-            pendingChanges: draft.pendingChanges.map((item) =>
-              item.id === activeInsertion.id
-                ? { ...item, status: "unresolved" }
-                : item
-            ),
-          }
-        }
-
-        return {
-          ...draft,
-          content: nextContent,
-          pendingChanges: draft.pendingChanges.map((item) =>
-            item.id === activeInsertion.id ? { ...item, status: "kept" } : item
-          ),
-        }
-      })
+    const hasPendingChanges = patchDraft.pendingChanges.some(
+      (item) => item.status === "pending"
     )
 
-    if (!nextContent) {
+    if (
+      hasPendingChanges &&
+      !window.confirm(
+        "End review now? Unreviewed suggestions will be discarded before the final draft is created."
+      )
+    ) {
+      return
+    }
+
+    setDraftError(null)
+
+    const resolvedChanges = patchDraft.pendingChanges.map((item) =>
+      item.status === "pending"
+        ? { ...item, status: "discarded" as const }
+        : item
+    )
+    let finalizedContent = patchDraft.baseContent
+    let hasUnresolvedChanges = false
+
+    const finalizedStatuses = resolvedChanges.map((item) => {
+      if (item.status !== "kept") {
+        return item
+      }
+
+      const nextContent = applyChangeToDraft(finalizedContent, item)
+
+      if (!nextContent) {
+        hasUnresolvedChanges = true
+        return { ...item, status: "unresolved" as const }
+      }
+
+      finalizedContent = nextContent
+      return item
+    })
+
+    setDrafts((current) =>
+      current.map((draft) =>
+        draft.id === activeDraftId
+          ? {
+              ...draft,
+              content: finalizedContent,
+              createdAt: new Date().toISOString(),
+              mode: "finalized-patches",
+              pendingChanges: hasUnresolvedChanges ? finalizedStatuses : [],
+            }
+          : draft
+      )
+    )
+    setActiveInsertionId(null)
+
+    if (hasUnresolvedChanges) {
       setDraftError(
-        "This patch suggestion could not be matched to the current draft and was marked unresolved."
+        "Some kept suggestions could not be applied cleanly and were marked unresolved in the review draft."
       )
     }
   }
@@ -1021,18 +1340,8 @@ export default function ArticleComparison() {
   }
 
   return (
-    <div className="min-h-screen bg-background p-6">
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top,rgba(59,130,246,0.08),transparent_35%),radial-gradient(circle_at_right,rgba(168,85,247,0.06),transparent_30%)] p-4 sm:p-6">
       <div className="mx-auto max-w-7xl space-y-6">
-        <div className="space-y-2">
-          <h1 className="text-3xl font-bold tracking-tight">
-            Article Comparison Tool
-          </h1>
-          <p className="text-muted-foreground">
-            Compare your source article against a reference to get AI-powered
-            insights on strengths, weaknesses, tone, and recommendations.
-          </p>
-        </div>
-
         <Accordion
           type="single"
           collapsible
@@ -1048,76 +1357,266 @@ export default function ArticleComparison() {
                 <p className="text-sm font-normal text-muted-foreground">
                   {analysis
                     ? "Collapsed so the analysis stays in focus. Expand to review or edit the articles."
-                    : "Paste the source article and the reference article you want to compare."}
+                    : "Paste article text or provide two article URLs to scrape and compare."}
                 </p>
               </div>
             </AccordionTrigger>
             <AccordionContent className="pb-4">
-              <div className="grid gap-6 lg:grid-cols-2">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <BookOpen className="h-5 w-5" />
-                      Source Article
-                    </CardTitle>
-                    <CardDescription>
-                      The article you want to analyze and improve
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <Textarea
-                      placeholder="Paste your source article here..."
-                      value={sourceArticle}
-                      onChange={(e) => setSourceArticle(e.target.value)}
-                      className="field-sizing-fixed h-[300px] resize-none overflow-y-auto"
-                    />
-                  </CardContent>
-                </Card>
+              <Tabs
+                value={articleInputMode}
+                onValueChange={setArticleInputMode}
+              >
+                <TabsList className="grid h-auto w-full grid-cols-2 rounded-2xl bg-muted/50 p-1">
+                  <TabsTrigger value="paste">Paste Text</TabsTrigger>
+                  <TabsTrigger value="url">Compare URLs</TabsTrigger>
+                </TabsList>
 
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <Sparkles className="h-5 w-5" />
-                      Reference Article
-                    </CardTitle>
-                    <CardDescription>
-                      The benchmark article for comparison
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent>
-                    <Textarea
-                      placeholder="Paste your reference article here..."
-                      value={referenceArticle}
-                      onChange={(e) => setReferenceArticle(e.target.value)}
-                      className="field-sizing-fixed h-[300px] resize-none overflow-y-auto"
-                    />
-                  </CardContent>
-                </Card>
-              </div>
+                <TabsContent value="paste" className="mt-6">
+                  <div className="grid gap-6 lg:grid-cols-2">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                          <BookOpen className="h-5 w-5" />
+                          Source Article
+                        </CardTitle>
+                        <CardDescription>
+                          The article you want to analyze and improve
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        <Textarea
+                          placeholder="Paste your source article here..."
+                          value={sourceArticle}
+                          onChange={(e) => setSourceArticle(e.target.value)}
+                          className="field-sizing-fixed h-[300px] resize-none overflow-y-auto"
+                        />
+                      </CardContent>
+                    </Card>
+
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                          <Sparkles className="h-5 w-5" />
+                          Reference Article
+                        </CardTitle>
+                        <CardDescription>
+                          The benchmark article for comparison
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        <Textarea
+                          placeholder="Paste your reference article here..."
+                          value={referenceArticle}
+                          onChange={(e) => setReferenceArticle(e.target.value)}
+                          className="field-sizing-fixed h-[300px] resize-none overflow-y-auto"
+                        />
+                      </CardContent>
+                    </Card>
+                  </div>
+                </TabsContent>
+
+                <TabsContent value="url" className="mt-6 space-y-6">
+                  <div className="grid gap-6 lg:grid-cols-2">
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                          <Link2 className="h-5 w-5" />
+                          Source URL
+                        </CardTitle>
+                        <CardDescription>
+                          Scrape the article body and any in-body media from the
+                          article you want to improve.
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        <Input
+                          type="url"
+                          placeholder="https://example.com/source-article"
+                          value={sourceUrl}
+                          onChange={(e) => setSourceUrl(e.target.value)}
+                        />
+                      </CardContent>
+                    </Card>
+
+                    <Card>
+                      <CardHeader>
+                        <CardTitle className="flex items-center gap-2">
+                          <Sparkles className="h-5 w-5" />
+                          Reference URL
+                        </CardTitle>
+                        <CardDescription>
+                          Scrape the benchmark article, including article-body
+                          images, videos, and embeds.
+                        </CardDescription>
+                      </CardHeader>
+                      <CardContent>
+                        <Input
+                          type="url"
+                          placeholder="https://example.com/reference-article"
+                          value={referenceUrl}
+                          onChange={(e) => setReferenceUrl(e.target.value)}
+                        />
+                      </CardContent>
+                    </Card>
+                  </div>
+
+                  <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                    <p className="text-sm text-muted-foreground">
+                      The scraper extracts readable article text first, then
+                      appends embedded media details so the comparison can
+                      account for article-body multimedia.
+                    </p>
+                    <Button
+                      onClick={handleCompareUrls}
+                      disabled={isScrapingUrls}
+                      className="rounded-2xl"
+                    >
+                      {isScrapingUrls ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Scraping...
+                        </>
+                      ) : (
+                        <>
+                          <Link2 className="mr-2 h-4 w-4" />
+                          Scrape URLs and Compare
+                        </>
+                      )}
+                    </Button>
+                  </div>
+
+                  {(sourceScrape || referenceScrape) && (
+                    <div className="grid gap-6 lg:grid-cols-2">
+                      {[sourceScrape, referenceScrape].map((article, index) => {
+                        if (!article) {
+                          return null
+                        }
+
+                        return (
+                          <Card
+                            key={`${index}-${article.title ?? article.body.slice(0, 24)}`}
+                          >
+                            <CardHeader>
+                              <CardTitle>
+                                {index === 0
+                                  ? "Scraped Source"
+                                  : "Scraped Reference"}
+                              </CardTitle>
+                              <CardDescription>
+                                {article.title ?? "Untitled article"}
+                              </CardDescription>
+                            </CardHeader>
+                            <CardContent className="space-y-3">
+                              <div className="flex flex-wrap gap-2">
+                                <Badge variant="outline">
+                                  {article.body.length.toLocaleString()} chars
+                                </Badge>
+                                <Badge variant="outline">
+                                  {article.media.length} media items
+                                </Badge>
+                              </div>
+                              {article.description && (
+                                <p className="text-sm text-muted-foreground">
+                                  {article.description}
+                                </p>
+                              )}
+                              <div className="space-y-2">
+                                <p className="text-sm font-medium text-foreground">
+                                  Scraped body
+                                </p>
+                                <ScrollArea className="h-80 rounded-xl border bg-muted/20 p-3">
+                                  <pre className="text-sm break-words whitespace-pre-wrap text-foreground">
+                                    {article.body}
+                                  </pre>
+                                </ScrollArea>
+                              </div>
+                              {article.media.length > 0 && (
+                                <div className="space-y-2 text-sm text-muted-foreground">
+                                  {article.media.slice(0, 4).map((media) => (
+                                    <div
+                                      key={`${media.type}-${media.url}`}
+                                      className="rounded-xl border bg-muted/30 px-3 py-2"
+                                    >
+                                      <div className="flex items-center gap-2 font-medium text-foreground">
+                                        {media.type === "image" ? (
+                                          <ImageIcon className="h-4 w-4" />
+                                        ) : (
+                                          <Video className="h-4 w-4" />
+                                        )}
+                                        {media.caption ??
+                                          media.alt ??
+                                          media.url}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              )}
+                            </CardContent>
+                          </Card>
+                        )
+                      })}
+                    </div>
+                  )}
+                </TabsContent>
+              </Tabs>
             </AccordionContent>
           </AccordionItem>
         </Accordion>
 
-        <div className="flex justify-center">
-          <Button
-            size="lg"
-            onClick={handleAnalyze}
-            disabled={isAnalyzing}
-            className="min-w-[200px]"
-          >
-            {isAnalyzing ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Analyzing...
-              </>
-            ) : (
-              <>
-                <Sparkles className="mr-2 h-4 w-4" />
-                Analyze Articles
-              </>
-            )}
-          </Button>
-        </div>
+        <section className="rounded-[24px] border bg-background/80 p-4 shadow-sm backdrop-blur sm:p-5">
+          <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="space-y-2">
+              <p className="text-sm font-medium">Current workflow</p>
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge variant={sourceArticle.trim() ? "default" : "secondary"}>
+                  {sourceArticle.trim() ? "Source ready" : "Add source"}
+                </Badge>
+                <Badge
+                  variant={referenceArticle.trim() ? "default" : "secondary"}
+                >
+                  {referenceArticle.trim()
+                    ? "Reference ready"
+                    : "Add reference"}
+                </Badge>
+                <Badge variant={analysis ? "default" : "secondary"}>
+                  {analysis ? "Analysis ready" : "Run analysis"}
+                </Badge>
+                <Badge variant="outline">{drafts.length} saved drafts</Badge>
+              </div>
+              <p className="text-sm text-muted-foreground">
+                {articleInputMode === "url"
+                  ? "Scrape both URLs to populate the workspace, then iterate on analysis, drafts, or patch suggestions."
+                  : "Start with the source and reference, then analyze before moving into draft or patch work."}
+              </p>
+            </div>
+            <Button
+              size="lg"
+              onClick={
+                articleInputMode === "url" ? handleCompareUrls : handleAnalyze
+              }
+              disabled={isAnalyzing || isScrapingUrls}
+              className="min-w-[220px] rounded-2xl"
+            >
+              {isAnalyzing || isScrapingUrls ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  {articleInputMode === "url" ? "Scraping..." : "Analyzing..."}
+                </>
+              ) : (
+                <>
+                  {articleInputMode === "url" ? (
+                    <Link2 className="mr-2 h-4 w-4" />
+                  ) : (
+                    <Sparkles className="mr-2 h-4 w-4" />
+                  )}
+                  {articleInputMode === "url"
+                    ? "Scrape URLs and Compare"
+                    : "Analyze Articles"}
+                </>
+              )}
+            </Button>
+          </div>
+        </section>
 
         {error && (
           <Alert variant="destructive">
@@ -1128,8 +1627,8 @@ export default function ArticleComparison() {
         )}
 
         {sourceArticle.trim() && (
-          <div className="grid gap-4 xl:grid-cols-[1.5fr_1fr]">
-            <Card>
+          <div className="grid gap-6 xl:grid-cols-[minmax(0,1.75fr)_340px] xl:items-start">
+            <Card className="border-0 bg-background/80 shadow-sm backdrop-blur">
               <CardHeader>
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                   <div>
@@ -1151,7 +1650,9 @@ export default function ArticleComparison() {
                         <Badge variant="outline">
                           {activeDraft.mode === "patches"
                             ? "Patch Review"
-                            : "Full Rewrite"}
+                            : activeDraft.mode === "finalized-patches"
+                              ? "Reviewed Patch Draft"
+                              : "Full Rewrite"}
                         </Badge>
                       )}
                       {drafts.length > 0 && (
@@ -1216,7 +1717,7 @@ export default function ArticleComparison() {
                       Draft {activeDraftIndex + 1} of {drafts.length}
                     </span>
                   )}
-                  {isPatchReviewActive && (
+                  {isPatchReviewSession && (
                     <span className="text-sm text-muted-foreground">
                       {pendingReviewQueue.length} pending of{" "}
                       {reviewQueue.length} suggestions
@@ -1224,7 +1725,7 @@ export default function ArticleComparison() {
                   )}
                 </div>
 
-                {isPatchReviewActive ? (
+                {isPatchReviewSession ? (
                   <div className="grid gap-4 lg:grid-cols-[1.3fr_0.9fr]">
                     <div className="overflow-hidden rounded-lg border">
                       <div className="border-b px-4 py-3">
@@ -1257,9 +1758,18 @@ export default function ArticleComparison() {
                                   {part.items.map((item) => (
                                     <div
                                       key={item.id}
+                                      onClick={() =>
+                                        item.status === "pending"
+                                          ? setActiveInsertionId(item.id)
+                                          : undefined
+                                      }
                                       className={`rounded-lg border p-3 ${getChangeStatusClasses(item.operation, item.status)} ${
                                         item.id === activeInsertion?.id
                                           ? "ring-2 ring-sky-500/50"
+                                          : ""
+                                      } ${
+                                        item.status === "pending"
+                                          ? "cursor-pointer"
                                           : ""
                                       }`}
                                     >
@@ -1291,6 +1801,37 @@ export default function ArticleComparison() {
                                         <pre className="text-sm leading-6 whitespace-pre-wrap line-through opacity-80">
                                           {formatDeletedLines(item.targetText)}
                                         </pre>
+                                      )}
+                                      {item.status === "pending" && (
+                                        <div className="mt-3 flex flex-wrap items-center gap-2">
+                                          <Button
+                                            variant="outline"
+                                            size="sm"
+                                            onClick={(event) => {
+                                              event.stopPropagation()
+                                              setActiveInsertionId(item.id)
+                                              resolveInsertionById(
+                                                item.id,
+                                                "discarded"
+                                              )
+                                            }}
+                                          >
+                                            Discard
+                                          </Button>
+                                          <Button
+                                            size="sm"
+                                            onClick={(event) => {
+                                              event.stopPropagation()
+                                              setActiveInsertionId(item.id)
+                                              resolveInsertionById(
+                                                item.id,
+                                                "kept"
+                                              )
+                                            }}
+                                          >
+                                            Keep
+                                          </Button>
+                                        </div>
                                       )}
                                     </div>
                                   ))}
@@ -1419,6 +1960,13 @@ export default function ArticleComparison() {
                               >
                                 Keep
                               </Button>
+                              <Button
+                                size="sm"
+                                onClick={handleEndReview}
+                                disabled={reviewQueue.length === 0}
+                              >
+                                End Review
+                              </Button>
                             </div>
                           </div>
                         ) : (
@@ -1429,8 +1977,8 @@ export default function ArticleComparison() {
                                 All suggestions reviewed
                               </p>
                               <p className="text-sm text-muted-foreground">
-                                This draft now contains only the patch changes
-                                you kept.
+                                Finalize this review to save the kept patch
+                                decisions as a new draft.
                               </p>
                             </div>
                             <div className="grid gap-3 sm:grid-cols-3">
@@ -1459,15 +2007,9 @@ export default function ArticleComparison() {
                                 </p>
                               </div>
                             </div>
-                            <Alert>
-                              <CheckCircle className="h-4 w-4" />
-                              <AlertTitle>Draft saved</AlertTitle>
-                              <AlertDescription>
-                                Review is complete. This patch draft is already
-                                saved in browser storage, and the kept changes
-                                remain in the draft text.
-                              </AlertDescription>
-                            </Alert>
+                            <Button onClick={handleEndReview}>
+                              End Review
+                            </Button>
                           </div>
                         )}
                       </div>
@@ -1486,87 +2028,188 @@ export default function ArticleComparison() {
               </CardContent>
             </Card>
 
-            <Card>
-              <CardHeader>
-                <CardTitle className="flex items-center gap-2">
-                  <Newspaper className="h-5 w-5" />
-                  Headline Ideas
-                </CardTitle>
-                <CardDescription>
-                  Generate headlines for the current active draft or fall back
-                  to the source article.
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <Button
-                  onClick={handleGenerateHeadlines}
-                  disabled={isGeneratingHeadlines || !activeArticle.trim()}
-                  className="w-full"
-                >
-                  {isGeneratingHeadlines ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Generating Headlines...
-                    </>
+            <Accordion type="single" collapsible className="w-full">
+              <AccordionItem
+                value="draft-diff"
+                className="rounded-[24px] border bg-background/80 px-5 shadow-sm backdrop-blur"
+              >
+                <AccordionTrigger className="py-5 hover:no-underline">
+                  <div className="flex w-full flex-col gap-3 text-left lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <h2 className="text-lg font-semibold">Draft Diff</h2>
+                      <p className="text-sm text-muted-foreground">
+                        Highlighted text shows what changed from the source
+                        article to the active draft.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline">
+                        {addedSegmentCount} additions
+                      </Badge>
+                      <Badge variant="outline">
+                        {removedSegmentCount} removals
+                      </Badge>
+                    </div>
+                  </div>
+                </AccordionTrigger>
+
+                <AccordionContent className="pb-5">
+                  {activeArticle === sourceArticle ? (
+                    <div className="rounded-2xl bg-muted/35 px-4 py-5 text-sm text-muted-foreground">
+                      {isPatchReviewSession
+                        ? "Patch review decisions stay in preview mode until you end the review. Finalize the review to see the draft diff here."
+                        : "No draft changes yet. Generate or review a draft to see the text differences here."}
+                    </div>
                   ) : (
-                    <>
-                      <WandSparkles className="mr-2 h-4 w-4" />
-                      {headlineSuggestions.length > 0
-                        ? `Regenerate Headlines for ${activeArticleLabel}`
-                        : `Generate Headlines for ${activeArticleLabel}`}
-                    </>
+                    <div className="grid gap-4 lg:grid-cols-2">
+                      <div className="rounded-2xl border bg-background p-4">
+                        <p className="mb-3 text-sm font-medium">
+                          Source Article
+                        </p>
+                        <div className="text-sm leading-7 whitespace-pre-wrap">
+                          {sourceDiffSegments.map((segment, index) => (
+                            <span
+                              key={`source-diff-${index}`}
+                              className={
+                                segment.type === "removed"
+                                  ? "rounded bg-rose-500/15 text-rose-900 dark:text-rose-100"
+                                  : undefined
+                              }
+                            >
+                              {segment.text}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+
+                      <div className="rounded-2xl border bg-background p-4">
+                        <p className="mb-3 text-sm font-medium">Active Draft</p>
+                        <div className="text-sm leading-7 whitespace-pre-wrap">
+                          {draftDiffSegments.map((segment, index) => (
+                            <span
+                              key={`draft-diff-${index}`}
+                              className={
+                                segment.type === "added"
+                                  ? "rounded bg-emerald-500/15 text-emerald-900 dark:text-emerald-100"
+                                  : undefined
+                              }
+                            >
+                              {segment.text}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    </div>
                   )}
-                </Button>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
 
-                {headlineError && (
-                  <Alert variant="destructive">
-                    <AlertTriangle className="h-4 w-4" />
-                    <AlertTitle>Headline Generation Failed</AlertTitle>
-                    <AlertDescription>{headlineError}</AlertDescription>
-                  </Alert>
-                )}
+            <aside className="space-y-4 xl:sticky xl:top-6">
+              <Card className="border-0 bg-background/80 shadow-sm backdrop-blur">
+                <CardHeader>
+                  <CardTitle className="flex items-center gap-2">
+                    <Newspaper className="h-5 w-5" />
+                    Action Rail
+                  </CardTitle>
+                  <CardDescription>
+                    Generate headlines for the active article and iterate on
+                    copy options without leaving the draft workspace.
+                  </CardDescription>
+                </CardHeader>
+                <CardContent className="space-y-4">
+                  <Button
+                    onClick={handleGenerateHeadlines}
+                    disabled={isGeneratingHeadlines || !activeArticle.trim()}
+                    className="w-full"
+                  >
+                    {isGeneratingHeadlines ? (
+                      <>
+                        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                        Generating Headlines...
+                      </>
+                    ) : (
+                      <>
+                        <WandSparkles className="mr-2 h-4 w-4" />
+                        {headlineSuggestions.length > 0
+                          ? `Regenerate Headlines for ${activeArticleLabel}`
+                          : `Generate Headlines for ${activeArticleLabel}`}
+                      </>
+                    )}
+                  </Button>
 
-                <div className="space-y-3">
-                  {headlineSuggestions.length === 0 ? (
-                    <p className="text-sm text-muted-foreground">
-                      Generate three options in sensational, factual, and
-                      authoritative tones.
-                    </p>
-                  ) : (
-                    headlineSuggestions.map((item, index) => (
-                      <Card key={`${item.tone}-${index}`}>
-                        <CardHeader className="pb-2">
-                          <div className="flex items-center justify-between gap-2">
-                            <CardTitle className="text-base">
+                  {headlineError && (
+                    <Alert variant="destructive">
+                      <AlertTriangle className="h-4 w-4" />
+                      <AlertTitle>Headline Generation Failed</AlertTitle>
+                      <AlertDescription>{headlineError}</AlertDescription>
+                    </Alert>
+                  )}
+
+                  <div className="space-y-3">
+                    {headlineSuggestions.length === 0 ? (
+                      <div className="rounded-2xl bg-muted/35 px-4 py-5 text-sm text-muted-foreground">
+                        Generate three options in sensational, factual, and
+                        authoritative tones.
+                      </div>
+                    ) : (
+                      headlineSuggestions.map((item, index) => (
+                        <div
+                          key={`${item.tone}-${index}`}
+                          className="rounded-2xl border bg-muted/20 px-4 py-4"
+                        >
+                          <div className="flex items-start justify-between gap-3">
+                            <p className="text-sm leading-6 font-medium">
                               {item.headline}
-                            </CardTitle>
-                            <Badge variant="outline" className="text-xs">
+                            </p>
+                            <Badge
+                              variant="outline"
+                              className="shrink-0 text-xs"
+                            >
                               {item.tone}
                             </Badge>
                           </div>
-                        </CardHeader>
-                        <CardContent>
-                          <p className="text-sm text-muted-foreground">
+                          <p className="mt-3 text-sm leading-6 text-muted-foreground">
                             {item.rationale}
                           </p>
-                        </CardContent>
-                      </Card>
-                    ))
-                  )}
-                </div>
-              </CardContent>
-            </Card>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </CardContent>
+              </Card>
+            </aside>
           </div>
         )}
 
         {analysis && (
-          <div className="space-y-4">
+          <div className="space-y-5">
+            <section className="rounded-[24px] border bg-background/80 p-5 shadow-sm backdrop-blur">
+              <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                <div className="space-y-1">
+                  <p className="text-sm font-medium">Analysis workspace</p>
+                  <p className="text-sm text-muted-foreground">
+                    Review concrete fact gaps, higher-level recommendations,
+                    tone shifts, and content coverage in one place.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+                  <Badge variant="outline">
+                    {analysis.factualDifferences.length} fact differences
+                  </Badge>
+                  <Badge variant="outline">
+                    {analysis.actionableRecommendations.length} recommendations
+                  </Badge>
+                </div>
+              </div>
+            </section>
+
             <Tabs
               value={activeAnalysisTab}
               onValueChange={setActiveAnalysisTab}
               className="space-y-4"
             >
-              <TabsList className="grid w-full grid-cols-2 md:grid-cols-2 lg:grid-cols-4">
+              <TabsList className="grid h-auto w-full grid-cols-2 rounded-2xl bg-muted/50 p-1 lg:grid-cols-4">
                 <TabsTrigger value="facts">Fact Differences</TabsTrigger>
                 <TabsTrigger value="tone">Tone Analysis</TabsTrigger>
                 <TabsTrigger value="comparison">Comparison</TabsTrigger>
@@ -1576,245 +2219,238 @@ export default function ArticleComparison() {
               </TabsList>
 
               <TabsContent value="facts" className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <BookOpen className="h-5 w-5" />
-                      Facts, Figures, Dates, and Information Differences
-                    </CardTitle>
-                    <CardDescription>
-                      Review concrete information differences and choose which
-                      ones should drive patch suggestions.
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="flex flex-col gap-3 rounded-lg border p-4 lg:flex-row lg:items-center lg:justify-between">
-                      <div>
-                        <p className="font-medium">
-                          Selected factual differences
-                        </p>
-                        <p className="text-sm text-muted-foreground">
-                          Select the reference-backed factual gaps and
-                          mismatches you want to act on.
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">
-                          {selectedFactDifferences.length} selected
-                        </Badge>
-                        <Button
-                          variant="outline"
-                          onClick={handleGeneratePatches}
-                          disabled={
-                            isGeneratingDraft ||
-                            isGeneratingInsertions ||
-                            (selectedFactDifferences.length === 0 &&
-                              selectedRecommendations.length === 0)
-                          }
-                        >
-                          {isGeneratingInsertions ? (
-                            <>
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                              Generating Patches...
-                            </>
-                          ) : (
-                            <>
-                              <Plus className="mr-2 h-4 w-4" />
-                              Generate Patch Suggestions
-                            </>
-                          )}
-                        </Button>
-                      </div>
+                <section className="rounded-[24px] border bg-background/80 p-5 shadow-sm backdrop-blur">
+                  <div className="flex flex-col gap-3 rounded-2xl bg-muted/35 p-4 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <h3 className="flex items-center gap-2 text-base font-semibold">
+                        <BookOpen className="h-5 w-5" />
+                        Facts, figures, dates, and information differences
+                      </h3>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Select the concrete reference-backed gaps and mismatches
+                        you want to turn into reviewable patch suggestions.
+                      </p>
                     </div>
-                    <ScrollArea className="h-[500px] pr-4">
-                      <div className="space-y-4">
-                        {analysis.factualDifferences.map(
-                          (difference, index) => {
-                            const checkboxId = `fact-difference-${index}`
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline">
+                        {selectedFactDifferences.length} selected
+                      </Badge>
+                      <Button
+                        variant="outline"
+                        onClick={handleGeneratePatches}
+                        disabled={
+                          isGeneratingDraft ||
+                          isGeneratingInsertions ||
+                          (selectedFactDifferences.length === 0 &&
+                            selectedRecommendations.length === 0)
+                        }
+                      >
+                        {isGeneratingInsertions ? (
+                          <>
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            Generating Patches...
+                          </>
+                        ) : (
+                          <>
+                            <Plus className="mr-2 h-4 w-4" />
+                            Generate Patch Suggestions
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </div>
 
-                            return (
-                              <Card key={index}>
-                                <CardHeader className="pb-2">
-                                  <div className="flex items-start gap-3">
-                                    <Checkbox
-                                      id={checkboxId}
-                                      checked={selectedFactDifferences.includes(
-                                        index
-                                      )}
-                                      onCheckedChange={(checked) =>
-                                        toggleFactDifference(
-                                          index,
-                                          checked === true
-                                        )
-                                      }
-                                      className="mt-1"
-                                    />
-                                    <div className="flex-1 space-y-3">
-                                      <div className="flex items-start justify-between gap-3">
-                                        <Label
-                                          htmlFor={checkboxId}
-                                          className="cursor-pointer items-start text-base leading-6"
-                                        >
-                                          {difference.summary}
-                                        </Label>
-                                        <Badge variant="outline">
-                                          {difference.type ===
-                                          "missing_in_source"
-                                            ? "Missing"
-                                            : "Mismatch"}
-                                        </Badge>
-                                        <Badge variant="secondary">
-                                          {getFactKindLabel(difference.kind)}
-                                        </Badge>
-                                      </div>
-                                      <p className="text-sm text-muted-foreground">
-                                        {difference.impact}
-                                      </p>
-                                    </div>
+                  <ScrollArea className="mt-4 h-[500px] pr-4">
+                    <div className="space-y-3">
+                      {analysis.factualDifferences.map((difference, index) => {
+                        const checkboxId = `fact-difference-${index}`
+
+                        return (
+                          <div
+                            key={index}
+                            className="rounded-2xl border bg-background px-4 py-4 transition-colors hover:bg-muted/15"
+                          >
+                            <div className="flex items-start gap-3">
+                              <Checkbox
+                                id={checkboxId}
+                                checked={selectedFactDifferences.includes(
+                                  index
+                                )}
+                                onCheckedChange={(checked) =>
+                                  toggleFactDifference(index, checked === true)
+                                }
+                                className="mt-1"
+                              />
+                              <div className="min-w-0 flex-1 space-y-3">
+                                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                                  <Label
+                                    htmlFor={checkboxId}
+                                    className="cursor-pointer text-base leading-6"
+                                  >
+                                    {difference.summary}
+                                  </Label>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <Badge variant="outline">
+                                      {difference.type === "missing_in_source"
+                                        ? "Missing"
+                                        : "Mismatch"}
+                                    </Badge>
+                                    <Badge variant="secondary">
+                                      {getFactKindLabel(difference.kind)}
+                                    </Badge>
                                   </div>
-                                </CardHeader>
-                                <CardContent className="space-y-3">
+                                </div>
+                                <p className="text-sm leading-6 text-muted-foreground">
+                                  {difference.impact}
+                                </p>
+                                <div className="grid gap-3 md:grid-cols-2">
                                   {difference.sourceText && (
-                                    <div>
-                                      <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                                    <div className="rounded-xl bg-rose-500/6 px-3 py-3">
+                                      <p className="text-xs font-semibold tracking-wide text-rose-700 uppercase dark:text-rose-300">
                                         Source detail
                                       </p>
-                                      <p className="mt-2 rounded-md border border-rose-500/30 bg-rose-500/5 p-3 text-sm text-muted-foreground">
+                                      <p className="mt-2 text-sm leading-6 text-muted-foreground">
                                         {difference.sourceText}
                                       </p>
                                     </div>
                                   )}
                                   {difference.referenceText && (
-                                    <div>
-                                      <p className="text-xs font-semibold tracking-wide text-muted-foreground uppercase">
+                                    <div className="rounded-xl bg-emerald-500/6 px-3 py-3">
+                                      <p className="text-xs font-semibold tracking-wide text-emerald-700 uppercase dark:text-emerald-300">
                                         Reference detail
                                       </p>
-                                      <p className="mt-2 rounded-md border border-emerald-500/30 bg-emerald-500/5 p-3 text-sm text-muted-foreground">
+                                      <p className="mt-2 text-sm leading-6 text-muted-foreground">
                                         {difference.referenceText}
                                       </p>
                                     </div>
                                   )}
-                                </CardContent>
-                              </Card>
-                            )
-                          }
-                        )}
-                      </div>
-                    </ScrollArea>
-                  </CardContent>
-                </Card>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </ScrollArea>
+                </section>
               </TabsContent>
 
               <TabsContent value="tone" className="space-y-4">
-                <div className="grid gap-4 md:grid-cols-2">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>Source Article Tone</CardTitle>
-                      <CardDescription>
-                        Tone analysis of your article
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                      <div>
-                        <h4 className="font-semibold">Primary Tone</h4>
+                <section className="rounded-[24px] border bg-background/80 p-5 shadow-sm backdrop-blur">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="rounded-2xl bg-muted/30 p-5">
+                      <div className="mb-4 space-y-1">
+                        <h3 className="font-semibold">Source Article Tone</h3>
                         <p className="text-sm text-muted-foreground">
-                          {analysis.toneAnalysis.sourceTone.primaryTone}
+                          Tone analysis of your article
                         </p>
                       </div>
-                      <div>
-                        <h4 className="font-semibold">Descriptors</h4>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {analysis.toneAnalysis.sourceTone.toneDescriptors.map(
-                            (desc, i) => (
-                              <Badge key={i} variant="secondary">
-                                {desc}
-                              </Badge>
-                            )
-                          )}
+                      <div className="space-y-4">
+                        <div>
+                          <h4 className="font-semibold">Primary Tone</h4>
+                          <p className="text-sm text-muted-foreground">
+                            {analysis.toneAnalysis.sourceTone.primaryTone}
+                          </p>
+                        </div>
+                        <div>
+                          <h4 className="font-semibold">Descriptors</h4>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {analysis.toneAnalysis.sourceTone.toneDescriptors.map(
+                              (desc, i) => (
+                                <Badge key={i} variant="secondary">
+                                  {desc}
+                                </Badge>
+                              )
+                            )}
+                          </div>
+                        </div>
+                        <div>
+                          <h4 className="font-semibold">Emotional Impact</h4>
+                          <p className="text-sm text-muted-foreground">
+                            {analysis.toneAnalysis.sourceTone.emotionalImpact}
+                          </p>
+                        </div>
+                        <div>
+                          <h4 className="font-semibold">Appropriateness</h4>
+                          <p className="text-sm text-muted-foreground">
+                            {analysis.toneAnalysis.sourceTone.appropriateness}
+                          </p>
                         </div>
                       </div>
-                      <div>
-                        <h4 className="font-semibold">Emotional Impact</h4>
-                        <p className="text-sm text-muted-foreground">
-                          {analysis.toneAnalysis.sourceTone.emotionalImpact}
-                        </p>
-                      </div>
-                      <div>
-                        <h4 className="font-semibold">Appropriateness</h4>
-                        <p className="text-sm text-muted-foreground">
-                          {analysis.toneAnalysis.sourceTone.appropriateness}
-                        </p>
-                      </div>
-                    </CardContent>
-                  </Card>
+                    </div>
 
-                  <Card>
-                    <CardHeader>
-                      <CardTitle>Reference Article Tone</CardTitle>
-                      <CardDescription>
-                        Tone analysis of the reference article
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent className="space-y-4">
-                      <div>
-                        <h4 className="font-semibold">Primary Tone</h4>
+                    <div className="rounded-2xl bg-muted/30 p-5">
+                      <div className="mb-4 space-y-1">
+                        <h3 className="font-semibold">
+                          Reference Article Tone
+                        </h3>
                         <p className="text-sm text-muted-foreground">
-                          {analysis.toneAnalysis.referenceTone.primaryTone}
+                          Tone analysis of the reference article
                         </p>
                       </div>
-                      <div>
-                        <h4 className="font-semibold">Descriptors</h4>
-                        <div className="mt-2 flex flex-wrap gap-2">
-                          {analysis.toneAnalysis.referenceTone.toneDescriptors.map(
-                            (desc, i) => (
-                              <Badge key={i} variant="secondary">
-                                {desc}
-                              </Badge>
-                            )
-                          )}
+                      <div className="space-y-4">
+                        <div>
+                          <h4 className="font-semibold">Primary Tone</h4>
+                          <p className="text-sm text-muted-foreground">
+                            {analysis.toneAnalysis.referenceTone.primaryTone}
+                          </p>
+                        </div>
+                        <div>
+                          <h4 className="font-semibold">Descriptors</h4>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {analysis.toneAnalysis.referenceTone.toneDescriptors.map(
+                              (desc, i) => (
+                                <Badge key={i} variant="secondary">
+                                  {desc}
+                                </Badge>
+                              )
+                            )}
+                          </div>
+                        </div>
+                        <div>
+                          <h4 className="font-semibold">Emotional Impact</h4>
+                          <p className="text-sm text-muted-foreground">
+                            {
+                              analysis.toneAnalysis.referenceTone
+                                .emotionalImpact
+                            }
+                          </p>
+                        </div>
+                        <div>
+                          <h4 className="font-semibold">Appropriateness</h4>
+                          <p className="text-sm text-muted-foreground">
+                            {
+                              analysis.toneAnalysis.referenceTone
+                                .appropriateness
+                            }
+                          </p>
                         </div>
                       </div>
-                      <div>
-                        <h4 className="font-semibold">Emotional Impact</h4>
-                        <p className="text-sm text-muted-foreground">
-                          {analysis.toneAnalysis.referenceTone.emotionalImpact}
-                        </p>
-                      </div>
-                      <div>
-                        <h4 className="font-semibold">Appropriateness</h4>
-                        <p className="text-sm text-muted-foreground">
-                          {analysis.toneAnalysis.referenceTone.appropriateness}
-                        </p>
-                      </div>
-                    </CardContent>
-                  </Card>
-                </div>
+                    </div>
+                  </div>
 
-                <Card>
-                  <CardHeader>
-                    <CardTitle>Tone Comparison</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <p className="text-muted-foreground">
+                  <div className="mt-4 rounded-2xl border bg-background px-5 py-4">
+                    <p className="text-sm font-medium">Tone comparison</p>
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground">
                       {analysis.toneAnalysis.toneComparison}
                     </p>
-                  </CardContent>
-                </Card>
+                  </div>
+                </section>
               </TabsContent>
 
               <TabsContent value="comparison" className="space-y-4">
-                <div className="grid gap-4 md:grid-cols-2">
-                  <Card>
-                    <CardHeader>
-                      <CardTitle className="text-green-600">
-                        Unique to Source
-                      </CardTitle>
-                      <CardDescription>
-                        Points your article covers that the reference
-                        doesn&apos;t
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
+                <section className="rounded-[24px] border bg-background/80 p-5 shadow-sm backdrop-blur">
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <div className="rounded-2xl bg-emerald-500/6 p-5">
+                      <div className="mb-4 space-y-1">
+                        <h3 className="font-semibold text-green-700 dark:text-green-300">
+                          Unique to Source
+                        </h3>
+                        <p className="text-sm text-muted-foreground">
+                          Points your article covers that the reference
+                          doesn&apos;t
+                        </p>
+                      </div>
                       <ul className="space-y-2">
                         {analysis.comparisonInsights.uniqueToSource.map(
                           (point, i) => (
@@ -1828,19 +2464,17 @@ export default function ArticleComparison() {
                           )
                         )}
                       </ul>
-                    </CardContent>
-                  </Card>
+                    </div>
 
-                  <Card>
-                    <CardHeader>
-                      <CardTitle className="text-blue-600">
-                        Unique to Reference
-                      </CardTitle>
-                      <CardDescription>
-                        Points the reference covers that yours doesn&apos;t
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
+                    <div className="rounded-2xl bg-blue-500/6 p-5">
+                      <div className="mb-4 space-y-1">
+                        <h3 className="font-semibold text-blue-700 dark:text-blue-300">
+                          Unique to Reference
+                        </h3>
+                        <p className="text-sm text-muted-foreground">
+                          Points the reference covers that yours doesn&apos;t
+                        </p>
+                      </div>
                       <ul className="space-y-2">
                         {analysis.comparisonInsights.uniqueToReference.map(
                           (point, i) => (
@@ -1854,19 +2488,17 @@ export default function ArticleComparison() {
                           )
                         )}
                       </ul>
-                    </CardContent>
-                  </Card>
+                    </div>
 
-                  <Card>
-                    <CardHeader>
-                      <CardTitle className="text-purple-600">
-                        Both Cover Well
-                      </CardTitle>
-                      <CardDescription>
-                        Strong points in both articles
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
+                    <div className="rounded-2xl bg-purple-500/6 p-5">
+                      <div className="mb-4 space-y-1">
+                        <h3 className="font-semibold text-purple-700 dark:text-purple-300">
+                          Both Cover Well
+                        </h3>
+                        <p className="text-sm text-muted-foreground">
+                          Strong points in both articles
+                        </p>
+                      </div>
                       <ul className="space-y-2">
                         {analysis.comparisonInsights.bothCoverWell.map(
                           (point, i) => (
@@ -1880,19 +2512,17 @@ export default function ArticleComparison() {
                           )
                         )}
                       </ul>
-                    </CardContent>
-                  </Card>
+                    </div>
 
-                  <Card>
-                    <CardHeader>
-                      <CardTitle className="text-orange-600">
-                        Content Gaps
-                      </CardTitle>
-                      <CardDescription>
-                        Important points neither article covers
-                      </CardDescription>
-                    </CardHeader>
-                    <CardContent>
+                    <div className="rounded-2xl bg-orange-500/6 p-5">
+                      <div className="mb-4 space-y-1">
+                        <h3 className="font-semibold text-orange-700 dark:text-orange-300">
+                          Content Gaps
+                        </h3>
+                        <p className="text-sm text-muted-foreground">
+                          Important points neither article covers
+                        </p>
+                      </div>
                       <ul className="space-y-2">
                         {analysis.comparisonInsights.gaps.map((point, i) => (
                           <li
@@ -1904,58 +2534,52 @@ export default function ArticleComparison() {
                           </li>
                         ))}
                       </ul>
-                    </CardContent>
-                  </Card>
-                </div>
+                    </div>
+                  </div>
+                </section>
               </TabsContent>
 
               <TabsContent value="recommendations" className="space-y-4">
-                <Card>
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <Lightbulb className="h-5 w-5" />
-                      Actionable Recommendations
-                    </CardTitle>
-                    <CardDescription>
-                      Prioritized suggestions for improving your article
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="flex flex-col gap-3 rounded-lg border p-4 lg:flex-row lg:items-center lg:justify-between">
-                      <div>
-                        <p className="font-medium">Selected recommendations</p>
-                        <p className="text-sm text-muted-foreground">
-                          Use recommendations to guide full rewrites and refine
-                          which broader improvements should be applied.
-                        </p>
-                      </div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <Badge variant="outline">
-                          {selectedRecommendations.length} recommendations
-                        </Badge>
-                        <Button
-                          onClick={handleGenerateDraft}
-                          disabled={
-                            isGeneratingDraft ||
-                            isGeneratingInsertions ||
-                            selectedRecommendations.length === 0
-                          }
-                        >
-                          {isGeneratingDraft ? (
-                            <>
-                              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                              Generating Draft...
-                            </>
-                          ) : (
-                            <>
-                              <WandSparkles className="mr-2 h-4 w-4" />
-                              Generate Improved Draft
-                            </>
-                          )}
-                        </Button>
-                      </div>
+                <section className="rounded-[24px] border bg-background/80 p-5 shadow-sm backdrop-blur">
+                  <div className="flex flex-col gap-3 rounded-2xl bg-muted/35 p-4 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                      <h3 className="flex items-center gap-2 text-base font-semibold">
+                        <Lightbulb className="h-5 w-5" />
+                        Actionable recommendations
+                      </h3>
+                      <p className="mt-1 text-sm text-muted-foreground">
+                        Use recommendations to guide full rewrites and refine
+                        which broader improvements should be applied.
+                      </p>
                     </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline">
+                        {selectedRecommendations.length} recommendations
+                      </Badge>
+                      <Button
+                        onClick={handleGenerateDraft}
+                        disabled={
+                          isGeneratingDraft ||
+                          isGeneratingInsertions ||
+                          selectedRecommendations.length === 0
+                        }
+                      >
+                        {isGeneratingDraft ? (
+                          <>
+                            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                            Generating Draft...
+                          </>
+                        ) : (
+                          <>
+                            <WandSparkles className="mr-2 h-4 w-4" />
+                            Generate Improved Draft
+                          </>
+                        )}
+                      </Button>
+                    </div>
+                  </div>
 
+                  <div className="mt-4 space-y-4">
                     <Alert>
                       <BookOpen className="h-4 w-4" />
                       <AlertTitle>
@@ -1975,64 +2599,56 @@ export default function ArticleComparison() {
                         <AlertDescription>{draftError}</AlertDescription>
                       </Alert>
                     )}
+                  </div>
 
-                    <ScrollArea className="h-[500px] pr-4">
-                      <div className="space-y-4">
-                        {analysis.actionableRecommendations.map(
-                          (rec, index) => {
-                            const checkboxId = `recommendation-${index}`
+                  <ScrollArea className="mt-4 h-[500px] pr-4">
+                    <div className="space-y-3">
+                      {analysis.actionableRecommendations.map((rec, index) => {
+                        const checkboxId = `recommendation-${index}`
 
-                            return (
-                              <Card key={index}>
-                                <CardHeader className="pb-2">
-                                  <div className="flex items-start gap-3">
-                                    <Checkbox
-                                      id={checkboxId}
-                                      checked={selectedRecommendations.includes(
-                                        index
-                                      )}
-                                      onCheckedChange={(checked) =>
-                                        toggleRecommendation(
-                                          index,
-                                          checked === true
-                                        )
-                                      }
-                                      className="mt-1"
-                                    />
-                                    <div className="flex-1 space-y-2">
-                                      <div className="flex items-start justify-between gap-3">
-                                        <Label
-                                          htmlFor={checkboxId}
-                                          className="cursor-pointer items-start text-base leading-6"
-                                        >
-                                          {rec.recommendation}
-                                        </Label>
-                                        {getPriorityBadge(rec.priority)}
-                                      </div>
-                                      <div className="flex items-center gap-2 text-sm">
-                                        <span className="text-muted-foreground">
-                                          Effort:
-                                        </span>
-                                        <Badge variant="outline">
-                                          {rec.effort}
-                                        </Badge>
-                                      </div>
-                                    </div>
-                                  </div>
-                                </CardHeader>
-                                <CardContent>
-                                  <p className="text-sm text-muted-foreground">
-                                    {rec.impact}
-                                  </p>
-                                </CardContent>
-                              </Card>
-                            )
-                          }
-                        )}
-                      </div>
-                    </ScrollArea>
-                  </CardContent>
-                </Card>
+                        return (
+                          <div
+                            key={index}
+                            className="rounded-2xl border bg-background px-4 py-4 transition-colors hover:bg-muted/15"
+                          >
+                            <div className="flex items-start gap-3">
+                              <Checkbox
+                                id={checkboxId}
+                                checked={selectedRecommendations.includes(
+                                  index
+                                )}
+                                onCheckedChange={(checked) =>
+                                  toggleRecommendation(index, checked === true)
+                                }
+                                className="mt-1"
+                              />
+                              <div className="min-w-0 flex-1 space-y-3">
+                                <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                                  <Label
+                                    htmlFor={checkboxId}
+                                    className="cursor-pointer text-base leading-6"
+                                  >
+                                    {rec.recommendation}
+                                  </Label>
+                                  {getPriorityBadge(rec.priority)}
+                                </div>
+                                <div className="flex flex-wrap items-center gap-2 text-sm">
+                                  <span className="text-muted-foreground">
+                                    Effort:
+                                  </span>
+                                  <Badge variant="outline">{rec.effort}</Badge>
+                                </div>
+                                <p className="text-sm leading-6 text-muted-foreground">
+                                  {rec.impact}
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })}
+                    </div>
+                  </ScrollArea>
+                </section>
               </TabsContent>
             </Tabs>
 
@@ -2040,7 +2656,7 @@ export default function ArticleComparison() {
               <Accordion type="single" collapsible className="w-full">
                 <AccordionItem
                   value="run-metrics"
-                  className="rounded-lg border px-4"
+                  className="rounded-[20px] border bg-background/80 px-4 shadow-sm"
                 >
                   <AccordionTrigger>Run Metrics</AccordionTrigger>
                   <AccordionContent>
@@ -2050,7 +2666,7 @@ export default function ArticleComparison() {
                         analysis.
                       </p>
                       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-5">
-                        <div className="rounded-lg border p-4">
+                        <div className="rounded-2xl bg-muted/35 p-4">
                           <p className="text-sm text-muted-foreground">
                             Input tokens
                           </p>
@@ -2058,7 +2674,7 @@ export default function ArticleComparison() {
                             {formatNumber(usageMetrics.inputTokens)}
                           </p>
                         </div>
-                        <div className="rounded-lg border p-4">
+                        <div className="rounded-2xl bg-muted/35 p-4">
                           <p className="text-sm text-muted-foreground">
                             Output tokens
                           </p>
@@ -2066,7 +2682,7 @@ export default function ArticleComparison() {
                             {formatNumber(usageMetrics.outputTokens)}
                           </p>
                         </div>
-                        <div className="rounded-lg border p-4">
+                        <div className="rounded-2xl bg-muted/35 p-4">
                           <p className="text-sm text-muted-foreground">
                             Total tokens
                           </p>
@@ -2074,13 +2690,13 @@ export default function ArticleComparison() {
                             {formatNumber(usageMetrics.totalTokens)}
                           </p>
                         </div>
-                        <div className="rounded-lg border p-4">
+                        <div className="rounded-2xl bg-muted/35 p-4">
                           <p className="text-sm text-muted-foreground">Cost</p>
                           <p className="text-2xl font-semibold">
                             {formatCost(usageMetrics.costUsd)}
                           </p>
                         </div>
-                        <div className="rounded-lg border p-4">
+                        <div className="rounded-2xl bg-muted/35 p-4">
                           <p className="text-sm text-muted-foreground">
                             Time taken
                           </p>
